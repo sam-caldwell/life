@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# IDEs
+/.idea/
+.vscode/
+
+# Binaries
+/life
+/*.exe
+/*.out
