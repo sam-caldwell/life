@@ -38,8 +38,8 @@ public:
     /** @brief Destructor; stops and joins all automata and clears the grid. */
     ~Board();
 
-    /** @brief Hard cap on the number of concurrent automata. */
-    static constexpr size_t MaxAutomata = 1000;
+    /** @brief Hard cap on the number of concurrent automata (1000 per CPU core, computed at runtime). */
+    size_t maxAutomata() const { return maxAutomataCap; }
 
     // Simulation control
     /** @brief Set the simulation running (true) or paused (false). */
@@ -135,7 +135,7 @@ public:
     std::mt19937& rng() { return prng; }
     /** @brief Uniform real in [0,1). */
     double rand01();
-    /** @brief Current load as fraction of MaxAutomata in [0,1]. */
+    /** @brief Current load as fraction of maxAutomata() in [0,1]. */
     double loadFactor() const;
 
     // Movement helpers
@@ -182,4 +182,6 @@ private:
 
     std::random_device rd; /**< entropy for PRNG seeding */
     std::mt19937 prng;     /**< board PRNG */
+
+    size_t maxAutomataCap{1000}; /**< runtime cap: 1000 threads per CPU core */
 };

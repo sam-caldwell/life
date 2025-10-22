@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 
 namespace {
 /** @brief Compute flattened index into grid vector for coordinates (x,y) in a width w grid. */
@@ -17,7 +18,11 @@ inline int idx(int x, int y, int w) { return y * w + x; }
 
 /** @copydoc Board::Board */
 Board::Board(int width, int height)
-    : w(width), h(height), grid(static_cast<size_t>(width * height)), prng(rd()) {}
+    : w(width), h(height), grid(static_cast<size_t>(width * height)), prng(rd()) {
+    unsigned int cores = std::thread::hardware_concurrency();
+    if (cores == 0) cores = 1;
+    maxAutomataCap = static_cast<size_t>(cores) * 1000ULL;
+}
 
 /** @copydoc Board::~Board */
 Board::~Board() {
@@ -73,6 +78,7 @@ void Board::placeInitial(unsigned count) {
     std::lock_guard<std::mutex> lock(mtx);
     int total = w * h;
     if (count > static_cast<unsigned>(total)) count = static_cast<unsigned>(total);
+    if (count > static_cast<unsigned>(maxAutomataCap)) count = static_cast<unsigned>(maxAutomataCap);
 
     // Random unique positions
     std::vector<int> posIdx(total);
@@ -279,8 +285,8 @@ bool Board::handleSpawn(const std::shared_ptr<Automaton>& actor,
     std::lock_guard<std::mutex> lock(mtx);
     if (!actor || !partner) return false;
 
-    if (automata.size() >= MaxAutomata) return false;
-    double lf = std::min(1.0, static_cast<double>(automata.size()) / static_cast<double>(MaxAutomata));
+    if (automata.size() >= maxAutomataCap) return false;
+    double lf = std::min(1.0, static_cast<double>(automata.size()) / static_cast<double>(maxAutomataCap));
     // Higher spawn probability when population is low; lower as it approaches the cap
     double accept = 0.2 + 0.8 * (1.0 - lf);
     if (rand01() > accept) return false;
@@ -477,7 +483,8 @@ double Board::rand01() {
 /** @copydoc Board::loadFactor */
 double Board::loadFactor() const {
     std::lock_guard<std::mutex> lock(mtx);
-    double lf = static_cast<double>(automata.size()) / static_cast<double>(MaxAutomata);
+    double denom = static_cast<double>(maxAutomataCap > 0 ? maxAutomataCap : 1);
+    double lf = static_cast<double>(automata.size()) / denom;
     if (lf < 0.0) lf = 0.0; if (lf > 1.0) lf = 1.0; return lf;
 }
 

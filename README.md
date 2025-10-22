@@ -6,7 +6,7 @@ two‑dimensional grid evolves in discrete time steps where each cell is either 
 cell depends only on its eight neighbors: a live cell survives if it has two or three live neighbors, otherwise it 
 dies; a dead cell becomes alive if it has exactly three live neighbors (Gardner, 1970). This simulation extends the 
 idea by representing each “life form” as an autonomous object and thread that can push, eat, or spawn based on local 
-interactions with a max population cap of 1000 automata.
+interactions. The simulation enforces a dynamic population cap of 1,000 automata per CPU core on the host.
 
 ## Requirements
 
