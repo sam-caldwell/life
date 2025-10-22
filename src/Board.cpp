@@ -21,7 +21,7 @@ Board::Board(int width, int height)
     : w(width), h(height), grid(static_cast<size_t>(width * height)), prng(rd()) {
     unsigned int cores = std::thread::hardware_concurrency();
     if (cores == 0) cores = 1;
-    maxAutomataCap = static_cast<size_t>(cores) * 500ULL;
+    maxAutomataCap = static_cast<size_t>(cores) * 200ULL;
 }
 
 /** @copydoc Board::~Board */
@@ -243,9 +243,10 @@ bool Board::handlePush(const std::shared_ptr<Automaton>& actor,
 /** @copydoc Board::handleEat */
 bool Board::handleEat(const std::shared_ptr<Automaton>& actor,
                       const std::shared_ptr<Automaton>& target) {
+    if (!actor || !target) return false;
+    bool success = false;
     {
         std::lock_guard<std::mutex> lock(mtx);
-        if (!actor || !target) return false;
 
         // Verify adjacency
         int ax=-1, ay=-1, tx=-1, ty=-1;
@@ -268,15 +269,21 @@ bool Board::handleEat(const std::shared_ptr<Automaton>& actor,
 
         // Remove target from grid and list
         removeLocked(target);
-        target->requestStop();
         // Update actor cell color for new weight
         auto itp = positions.find(actor.get());
         if (itp != positions.end() && win) {
             drawCellUnlocked(itp->second.first, itp->second.second);
             wrefresh(win);
         }
+        success = true;
     }
-    return true;
+    if (success) {
+        target->requestStop();
+        if (target->threadId() != std::this_thread::get_id()) {
+            target->join();
+        }
+    }
+    return success;
 }
 
 /** @copydoc Board::handleSpawn */
@@ -560,9 +567,16 @@ bool Board::attemptFlee(const std::shared_ptr<Automaton>& a) {
 
 /** @copydoc Board::removeAutomaton */
 void Board::removeAutomaton(const std::shared_ptr<Automaton>& a) {
-    std::lock_guard<std::mutex> lock(mtx);
     if (!a) return;
-    removeLocked(a);
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        removeLocked(a);
+    }
+    // Stop and join outside the lock when possible
+    a->requestStop();
+    if (a->threadId() != std::this_thread::get_id()) {
+        a->join();
+    }
 }
 
 /** @copydoc Board::attemptPursue */
@@ -620,7 +634,11 @@ bool Board::canEat(const std::shared_ptr<Automaton>& actor,
     char as = actor->symbol();
     char ts = target->symbol();
     if (as > ts) return true; // higher letter eats lower letter
-    if (as == ts && actor->weight() < 10) return true; // same species allowed only if actor weight < 10
+    if (as == ts) {
+        // Same-species cannibalism: allowed only if species A–R and actor's weight < 10
+        if (as <= 'R' && actor->weight() < 10) return true;
+        return false;
+    }
     return false;
 }
 void Board::drawCell(int x, int y) {

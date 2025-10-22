@@ -6,7 +6,7 @@ two‑dimensional grid evolves in discrete time steps where each cell is either 
 cell depends only on its eight neighbors: a live cell survives if it has two or three live neighbors, otherwise it 
 dies; a dead cell becomes alive if it has exactly three live neighbors (Gardner, 1970). This simulation extends the 
 idea by representing each “life form” as an autonomous object and thread that can push, eat, or spawn based on local 
-interactions. The simulation enforces a dynamic population cap of 500 automata per CPU core on the host.
+interactions. The simulation enforces a dynamic population cap of 200 automata per CPU core on the host.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ interactions. The simulation enforces a dynamic population cap of 500 automata p
     distance from the predator in order to survive.
 - Eat: 
   - Allowed if the actor’s species letter is greater than the target’s (e.g., B can eat A; A cannot eat B).
-  - Same-species eating is allowed only if the actor’s weight is < 10. 
+  - Same-species eating is allowed only if the actor’s weight is < 10 and the species letter is A–R. Species S–Z cannot eat their own kind.
   - On success, the actor gains the target’s weight (capped at 100).
 - Push: 
   - If heavier, 

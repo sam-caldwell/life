@@ -37,6 +37,8 @@ public:
     bool isAlive() const { return alive.load(); }
     /** @brief Join the worker thread if joinable. */
     void join();
+    /** @brief Return the std::thread::id of the worker thread (default-constructed if not started). */
+    std::thread::id threadId() const { return worker.get_id(); }
 
     // Identity
     /** @brief Species letter (A–Z). */

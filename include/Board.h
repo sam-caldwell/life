@@ -38,7 +38,7 @@ public:
     /** @brief Destructor; stops and joins all automata and clears the grid. */
     ~Board();
 
-    /** @brief Hard cap on the number of concurrent automata (500 per CPU core, computed at runtime). */
+    /** @brief Hard cap on the number of concurrent automata (200 per CPU core, computed at runtime). */
     size_t maxAutomata() const { return maxAutomataCap; }
 
     // Simulation control
@@ -183,5 +183,5 @@ private:
     std::random_device rd; /**< entropy for PRNG seeding */
     std::mt19937 prng;     /**< board PRNG */
 
-    size_t maxAutomataCap{500}; /**< runtime cap: 500 threads per CPU core */
+    size_t maxAutomataCap{200}; /**< runtime cap: 200 threads per CPU core */
 };
