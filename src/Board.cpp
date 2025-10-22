@@ -21,7 +21,7 @@ Board::Board(int width, int height)
     : w(width), h(height), grid(static_cast<size_t>(width * height)), prng(rd()) {
     unsigned int cores = std::thread::hardware_concurrency();
     if (cores == 0) cores = 1;
-    maxAutomataCap = static_cast<size_t>(cores) * 1000ULL;
+    maxAutomataCap = static_cast<size_t>(cores) * 500ULL;
 }
 
 /** @copydoc Board::~Board */
@@ -388,6 +388,8 @@ void Board::drawStatusLine(WINDOW* win) {
     size_t live = 0; for (auto& a : automata) if (a && a->isAlive()) ++live;
     std::string status = "  | [s]tart/[p]ause  [r]eseed  [c]lear  speed[-/+]  [q]uit  | Threads: ";
     status += std::to_string(live);
+    status += "/";
+    status += std::to_string(maxAutomataCap);
     status += "  Delay(ms): ";
     status += std::to_string(getStepDelayMs());
     status += isRunning() ? "  | RUNNING" : "  | PAUSED";
