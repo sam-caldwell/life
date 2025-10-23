@@ -39,8 +39,9 @@ interactions. The simulation enforces a dynamic population cap of 200 automata p
 ## Behavior
 
 ### Initial State
-- Every automaton starts with a random weight in [10, 50], symbol `A`–`Z`, and color. Weight then evolves over 
-  time (0–100) due to eating and starvation.
+- Every automaton starts with a random weight in [10, 50], symbol `A`–`Z`, and color. Species are assigned with a bias
+  where `A` is most likely and `Z` least likely; at least two `Z` automata are guaranteed on reseed if space allows.
+  Weight then evolves over time (0–100) due to eating and starvation.
 - Species is indicated by the letter (A–Z). 
 - Weight is indicated by ANSI color: darker for low weight up to white at 100. A weight legend appears on the bottom 
   bar as 0-10-20-30-50-70-80-90-100 (100 is shown in bold white).

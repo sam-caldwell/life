@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <array>
 #include <thread>
 
 namespace {
@@ -73,7 +74,22 @@ void Board::reseed(unsigned count) {
 /** @brief See Board::reseed; helper to place initial automata with random positions and traits. */
 void Board::placeInitial(unsigned count) {
     std::uniform_int_distribution<int> weightDist(10, 50);
-    std::uniform_int_distribution<int> speciesDist(0, 25); // A-Z
+    // Weighted species distribution: A most likely, Z least likely
+    auto pickSpeciesWeighted = [this]() -> char {
+        static const std::array<int,26> weights = []{
+            std::array<int,26> w{}; // A..Z => 26..1
+            for (int i=0;i<26;++i) w[i] = 26 - i;
+            return w;
+        }();
+        static const int total = []{
+            int s=0; for (int i=0;i<26;++i) s += 26 - i; return s; // 351
+        }();
+        std::uniform_int_distribution<int> dist(1, total);
+        int r = dist(prng);
+        int acc = 0;
+        for (int i=0;i<26;++i) { acc += weights[i]; if (r <= acc) return static_cast<char>('A' + i); }
+        return 'Z';
+    };
 
     std::lock_guard<std::mutex> lock(mtx);
     int total = w * h;
@@ -85,11 +101,28 @@ void Board::placeInitial(unsigned count) {
     for (int i = 0; i < total; ++i) posIdx[i] = i;
     std::shuffle(posIdx.begin(), posIdx.end(), prng);
 
-    for (unsigned i = 0; i < count; ++i) {
-        int p = posIdx[i];
+    // Ensure at least two Z automata if possible
+    unsigned z_needed = (count >= 2) ? 2u : count;
+    unsigned idxPos = 0;
+    for (unsigned i = 0; i < z_needed; ++i) {
+        int p = posIdx[idxPos++];
         int x = p % w;
         int y = p / w;
-        char sym = static_cast<char>('A' + speciesDist(prng));
+        char sym = 'Z';
+        short color = static_cast<short>(1 + (sym - 'A') % 7);
+        auto a = std::make_shared<Automaton>(*this, sym, color, weightDist(prng));
+        automata.push_back(a);
+        grid[static_cast<size_t>(p)].occ = a;
+        positions[a.get()] = {x, y};
+        if (win) { drawCellUnlocked(x, y); }
+        a->start();
+    }
+
+    for (; idxPos < count; ++idxPos) {
+        int p = posIdx[idxPos];
+        int x = p % w;
+        int y = p / w;
+        char sym = pickSpeciesWeighted();
         short color = static_cast<short>(1 + (sym - 'A') % 7);
         auto a = std::make_shared<Automaton>(*this, sym, color, weightDist(prng));
         automata.push_back(a);
@@ -400,6 +433,7 @@ void Board::drawStatusLine(WINDOW* win) {
     status += "  Delay(ms): ";
     status += std::to_string(getStepDelayMs());
     status += isRunning() ? "  | RUNNING" : "  | PAUSED";
+    if (!statusNote.empty()) { status += "  | "; status += statusNote; }
     if ((int)status.size() + x < cols) status.append((size_t)(cols - x - (int)status.size()), ' ');
     mvwprintw(win, rows - 1, x, "%s", status.c_str());
     wrefresh(win);
@@ -651,4 +685,16 @@ void Board::drawCell(int x, int y) {
 void Board::refresh() {
     std::lock_guard<std::mutex> lock(mtx);
     if (win) wrefresh(win);
+}
+
+/** @copydoc Board::setStatusNote */
+void Board::setStatusNote(const std::string& note) {
+    std::lock_guard<std::mutex> lock(mtx);
+    statusNote = note;
+}
+
+/** @copydoc Board::clearStatusNote */
+void Board::clearStatusNote() {
+    std::lock_guard<std::mutex> lock(mtx);
+    statusNote.clear();
 }

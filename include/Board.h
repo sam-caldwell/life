@@ -97,6 +97,11 @@ public:
     /** @brief Refresh the window (thread-safe). */
     void refresh();
 
+    /** @brief Set an extra status note to be appended on the status line (e.g., "terminating"). */
+    void setStatusNote(const std::string& note);
+    /** @brief Clear the extra status note from the status line. */
+    void clearStatusNote();
+
     // Position accessors used by Automaton; these are guarded internally
     /** @brief Look up the current coordinates of @p who. */
     bool tryGetPosition(const std::shared_ptr<Automaton>& who, int& x, int& y);
@@ -184,4 +189,6 @@ private:
     std::mt19937 prng;     /**< board PRNG */
 
     size_t maxAutomataCap{200}; /**< runtime cap: 200 threads per CPU core */
+
+    std::string statusNote; /**< extra status note appended to status line */
 };

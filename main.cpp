@@ -84,6 +84,8 @@ int main() {
         switch (ch) {
             case 'q':
             case 'Q':
+                board.setStatusNote("terminating");
+                board.drawStatusLine(stdscr);
                 done = true; break;
             case 's': case 'S':
                 board.toggleRunning(); break;
