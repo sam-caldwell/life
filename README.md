@@ -25,7 +25,8 @@ interactions. The simulation enforces a dynamic population cap of 200 automata p
 
 - Configure: `make configure`
 - Build: `make build`
-- Run: `./build/life`
+- Run classic life: `./build/life`
+- Run physics variant: `./build/physics`
 
 ## Controls
 
@@ -35,6 +36,61 @@ interactions. The simulation enforces a dynamic population cap of 200 automata p
 - `c`: clear board
 - `-`/`+`: slow down / speed up automata
 - `q`: quit
+
+The physics variant uses the same controls and displays a mass legend (0–100) mapped to 16 color buckets.
+
+## Physics Variant Rules
+
+- Only Newtonian mechanics are applied (no Life/agent rules).
+- Particles have mass [0–100], velocity, and collide elastically.
+- Gravitational acceleration is computed from nearby mass clusters (adjacent particles combine as a single gravitational source).
+- Particles bounce off screen boundaries.
+- Population is capped at 100 particles.
+
+### Particle Elasticity and Energy Loss
+
+- Each particle has an `elasticity` in the range 0–10 (random at spawn).
+- On particle–particle collision, the pair’s coefficient of restitution `e` is derived from their elasticities
+  (0..10 → 0..1), combined conservatively via `e = min(e_a, e_b)`. Momentum is conserved and kinetic energy is
+  reduced according to `e`, with the loss interpreted as heat.
+- Boundary bounces use the global `restitution` setting.
+
+### Fragmentation (High-Momentum Collisions)
+
+- If two particles collide with sufficient momentum (greater than `10 × max_mass`, i.e., > 1,000 using max mass 100),
+  each particle splits into two particles of the next lower letter (e.g., `Z+Z → 4×Y`, `Z+Y → 2×Y + 2×X`).
+- Each child inherits half the parent’s mass (rounded), parent velocity (slightly separated), and the parent’s elasticity.
+- The original two particles are removed; only the produced particles remain.
+
+### Combination (Adjacency Over Time)
+
+- If two particles remain immediately adjacent for 10 cycles, they have a 50% chance to combine.
+- Letter combination follows index addition (e.g., `A+A=B`, `B+B=D`, `A+B=C`), capped at `Z`.
+- Combined mass is clamped to the maximum mass (100). Momentum is conserved: the resulting velocity is the
+  mass-weighted average of the two velocities, and the new particle appears at the first particle’s position.
+
+### Decay
+
+- Z decays every 10 cycles into two Y particles. The original Z disappears; only the two Ys remain. Each child
+  inherits approximately half the mass and the parent’s elasticity. Each child is given unit speed (1) and heads in
+  opposite random directions away from the original location. If the particle cap (100) would be exceeded, only one Y
+  may be produced.
+
+### Initial Population
+
+- On launch, the physics variant seeds a random number of particles between 1 and 20 (subject to the 100-particle cap).
+
+### Physics Tunables
+
+- Defaults: `gravity=9.8`, `radius=1.0`, `restitution=0.98` (applies to collisions and boundary bounces).
+- Flags (override env):
+  - `./build/physics --gravity=12.0 --radius=0.8 --restitution=0.95`
+  - Short forms: `-g 12.0 -r 0.8 -e 0.95`
+- Environment variables:
+  - `PHYSICS_G=12.0`
+  - `PHYSICS_RADIUS=0.8`
+  - `PHYSICS_RESTITUTION=0.95`
+- Validation: `gravity>=0`, `radius>=0`, `0<=restitution<=1`. Flags take precedence over environment variables.
 
 ## Behavior
 
