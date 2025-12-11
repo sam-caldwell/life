@@ -182,16 +182,11 @@ int main(int argc, char** argv) {
 
     PhysicsWorld world(gridW, gridH, gravity, radius, restitution);
     world.setWindow(stdscr);
-    // Initial population: random count up to 20 (and within cap)
+    // Initial population: half of MaxParticles, symbols M..Z only
     {
-        std::random_device rd{};
-        std::mt19937 gen(rd());
-        int cap = (int)std::min<size_t>(20, world.maxParticles());
-        if (cap < 1) cap = 1;
-        std::uniform_int_distribution<int> d(1, cap);
-        unsigned n = (unsigned)d(gen);
+        unsigned n = (unsigned)(world.maxParticles() / 2);
         world.reseed(n);
-        Logger::info("physics reseed: count=" + std::to_string(n));
+        Logger::info("physics reseed (init): count=" + std::to_string(n) + ", symbols M..Z");
     }
     world.startThread();
     world.drawStatusLine(stdscr);

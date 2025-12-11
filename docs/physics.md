@@ -48,13 +48,21 @@ No background thread: the main loop steps the world based on elapsed time.
   - Pairs that remain adjacent for 10 cycles have a 50% chance to combine into a heavier particle (symbol index adds,
     capped at `Z`; mass clamped to 100). Momentum is conserved.
 - Decay:
-  - `Z` decays periodically into two `Y` children. Mass is conserved exactly with a 50/50 integer split (m1 = ⌊M/2⌋,
-    m2 = M − m1). If a split would exceed capacity (needs net +1 slot), the decay is deferred. If mass < 2, `Z` converts
-    to `Y` without splitting.
+  - Letters `W`, `X`, `Y`, `Z` decay periodically. For a parent letter `L ∈ {W,X,Y,Z}`:
+    - 90%: split into two children of letter `(L−1)` with exact 50/50 integer mass split. If mass < 2, the parent simply
+      converts to `(L−1)` (no split).
+    - 10%: split into four children of letter `(L−2)` with integer 25% shares; children are emitted along unit cardinal
+      directions. Requires mass ≥ 4; otherwise the two-child mode applies.
+    - Capacity-aware: if a split would exceed capacity (needs net +1 or +3 slots), the decay is deferred for that parent.
 - Recycling:
   - Mass that cannot be instantiated due to capacity or clamps, and energy dissipated by inelastic impacts/boundary
     bounces, accumulates in hidden pools. When the mass pool reaches 100 or the energy pool reaches 200 (arbitrary
     units), the world injects a new random `Z` particle using available mass and a velocity derived from the energy pool.
+
+## Initialization & Reseed
+
+- Startup seeding: populates exactly half of `MaxParticles` (cap-aware) at unique screen cells.
+- Symbol range: initial and reseed populations use only upper-half letters `M`..`Z`.
 
 ## Tunables
 - Command line:

@@ -148,7 +148,8 @@ void PhysicsWorld::reseedSoA(unsigned count) {
     std::uniform_real_distribution<float> vxDist(-3.5f, 3.5f);
     std::uniform_real_distribution<float> vyDist(-2.0f, 2.0f);
     std::uniform_int_distribution<int> massDist(1, 100);
-    std::uniform_int_distribution<int> symDist(0, 25);
+    // Restrict initial symbols to M..Z (upper-half letters)
+    std::uniform_int_distribution<int> symDist(12, 25); // 0=A .. 25=Z
     std::uniform_int_distribution<int> elastDist(0, 10);
     std::uniform_int_distribution<int> ixDist(0, std::max(0, w - 1));
     std::uniform_int_distribution<int> iyDist(0, std::max(0, h - 1));
@@ -156,22 +157,28 @@ void PhysicsWorld::reseedSoA(unsigned count) {
     unsigned placed=0; int attempts=0; const int maxAttempts = (int)count * 50 + 500;
     while (placed < count && attempts < maxAttempts) {
         ++attempts; int ix = ixDist(prng); int iy = iyDist(prng); long long key = ((long long)iy << 32) ^ (unsigned long long)ix; if (occ.count(key)) continue; occ.insert(key);
-        soa_id.push_back(nextId++); soa_x.push_back((float)ix); soa_y.push_back((float)iy); soa_vx.push_back(vxDist(prng)); soa_vy.push_back(vyDist(prng)); soa_mass.push_back((uint8_t)massDist(prng)); soa_elast10.push_back((uint8_t)elastDist(prng)); soa_decay.push_back(0); soa_alive.push_back(1); soa_sym.push_back((char)('A'+symDist(prng))); soa_pix.push_back(-1); soa_piy.push_back(-1); ++placed;
+        soa_id.push_back(nextId++);
+        soa_x.push_back((float)ix);
+        soa_y.push_back((float)iy);
+        soa_vx.push_back(vxDist(prng));
+        soa_vy.push_back(vyDist(prng));
+        soa_mass.push_back((uint8_t)massDist(prng));
+        soa_elast10.push_back((uint8_t)elastDist(prng));
+        soa_decay.push_back(0);
+        soa_alive.push_back(1);
+        soa_sym.push_back((char)('A' + symDist(prng))); // M..Z only
+        soa_pix.push_back(-1);
+        soa_piy.push_back(-1);
+        ++placed;
     }
 }
 
 void PhysicsWorld::reseedRandom() {
-    // Random count 5%..15% of drawable cells, capped at MaxParticles
-    int maxCount = std::max(10, (w * h) / 7);
-    int minCount = std::max(5, (w * h) / 30);
-    int cellCapI = std::max(0, w) * std::max(0, h);
-    if (maxCount > (int)MaxParticles) maxCount = (int)MaxParticles;
-    if (minCount > (int)MaxParticles) minCount = (int)MaxParticles;
-    if (maxCount > cellCapI) maxCount = cellCapI;
-    if (minCount > cellCapI) minCount = cellCapI;
-    if (minCount > maxCount) minCount = maxCount;
-    std::uniform_int_distribution<int> cnt(minCount, maxCount);
-    reseedSoA((unsigned)cnt(prng));
+    // Seed half of the maximum particles, clamped by screen capacity
+    unsigned half = (unsigned)(MaxParticles / 2);
+    unsigned cellCap = (unsigned)((std::max(0, w) * std::max(0, h)));
+    if (half > cellCap) half = cellCap;
+    reseedSoA(half);
 }
 
 void PhysicsWorld::drawAll(WINDOW* w_) {
@@ -566,7 +573,9 @@ void PhysicsWorld::applyFragmentationsSoAFromSchedule() {
 
 void PhysicsWorld::updateDecaySoA() {
     // Parallel detection; centralized apply for capacity and conservation.
-    // Z: 90% → 2x 'Y' (50/50); 10% → 4x 'X' (25% each) with unit velocities up/down/left/right.
+    // Decay applies to letters W, X, Y, Z with the same structure as Z:
+    //  - 90%: split into 2 children of (L-1) with 50/50 integer mass split
+    //  - 10%: split into 4 children of (L-2) with 25% shares (integer split) and unit cardinal velocities
     size_t liveCount = 0; for (size_t i=0;i<soa_alive.size();++i) if (soa_alive[i]) ++liveCount;
     struct ChildDec { size_t pi; float offx, offy; float vx, vy; int m; char sym; };
     std::vector<std::vector<size_t>> toKillLocal((size_t)numWorkers);
@@ -578,23 +587,26 @@ void PhysicsWorld::updateDecaySoA() {
         for (size_t i=b;i<e;++i) {
             if (!soa_alive[i]) continue;
             uint8_t d = (uint8_t)(soa_decay[i] + 1); soa_decay[i] = d; if (d < 10) continue; soa_decay[i] = 0;
-            if (soa_sym[i] != 'Z') continue;
-            int massZ = (int)soa_mass[i];
-            if (massZ < 2) { soa_sym[i] = 'Y'; continue; }
-            bool fourWay = (coin10(prng) == 0) && (massZ >= 4);
+            char L = soa_sym[i];
+            if (L < 'W' || L > 'Z') continue; // only W, X, Y, Z decay
+            int mpar = (int)soa_mass[i];
+            char twoSym = (L > 'A') ? (char)(L - 1) : 'A';
+            char fourSym = (L > 'B') ? (char)(L - 2) : 'A';
+            if (mpar < 2) { soa_sym[i] = twoSym; continue; }
+            bool fourWay = (coin10(prng) == 0) && (mpar >= 4);
             float sep = std::max(0.1f, partRadius*0.6f);
             kill.push_back(i);
             if (fourWay) {
-                int q = massZ / 4; int r = massZ - 3*q; int mA=q, mB=q, mC=q, mD=q; if (r>0){mA++;r--; } if (r>0){mB++;r--; } if (r>0){mC++;r--; }
-                ch.push_back({i, 0.0f, -sep, 0.0f, -1.0f, mA, 'X'});
-                ch.push_back({i, 0.0f,  sep, 0.0f,  1.0f, mB, 'X'});
-                ch.push_back({i, -sep, 0.0f, -1.0f, 0.0f, mC, 'X'});
-                ch.push_back({i,  sep, 0.0f,  1.0f, 0.0f, mD, 'X'});
+                int q = mpar / 4; int r = mpar - 3*q; int mA=q, mB=q, mC=q, mD=q; if (r>0){mA++;r--; } if (r>0){mB++;r--; } if (r>0){mC++;r--; }
+                ch.push_back({i, 0.0f, -sep, 0.0f, -1.0f, mA, fourSym});
+                ch.push_back({i, 0.0f,  sep, 0.0f,  1.0f, mB, fourSym});
+                ch.push_back({i, -sep, 0.0f, -1.0f, 0.0f, mC, fourSym});
+                ch.push_back({i,  sep, 0.0f,  1.0f, 0.0f, mD, fourSym});
             } else {
-                int m1 = massZ / 2; int m2 = massZ - m1;
+                int m1 = mpar / 2; int m2 = mpar - m1;
                 float theta = ang(prng); float ux = std::cos(theta), uy = std::sin(theta);
-                ch.push_back({i, ux*sep,  uy*sep,  soa_vx[i], soa_vy[i], m1, 'Y'});
-                ch.push_back({i,-ux*sep, -uy*sep, soa_vx[i], soa_vy[i], m2, 'Y'});
+                ch.push_back({i, ux*sep,  uy*sep,  soa_vx[i], soa_vy[i], m1, twoSym});
+                ch.push_back({i,-ux*sep, -uy*sep, soa_vx[i], soa_vy[i], m2, twoSym});
             }
         }
     });
