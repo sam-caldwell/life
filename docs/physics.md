@@ -23,8 +23,10 @@ No background thread: the main loop steps the world based on elapsed time.
 
 ## Physics and Rules
 
-- Integration: simple Euler update per step (`x += vx*dt`, `y += vy*dt`).
-- Boundary: bounce with coefficient of restitution `restitution`.
+- Integration: 
+  - simple Euler update per step (`x += vx*dt`, `y += vy*dt`).
+- Boundary: 
+  - bounce with coefficient of restitution `restitution`.
 - Collisions (pairwise check):
   - Contact detected when centers within `2*radius`.
   - Resolve overlap by pushing apart based on relative masses.
@@ -42,21 +44,15 @@ No background thread: the main loop steps the world based on elapsed time.
     without splitting.
 
 ## Tunables
-
-Command line:
-
-- `--gravity=<g>` or `-g` (non‑negative)
-- `--radius=<r>` or `-r` (non‑negative)
-- `--restitution=<e>` or `-e` (0..1)
-
-Environment:
-
-- `PHYSICS_G`, `PHYSICS_RADIUS`, `PHYSICS_RESTITUTION`
-
-Other constants:
-
-- `MaxParticles` = 100 (hard cap)
-- Color scale avoids pair 1 (black) and uses 2..16
+- Command line:
+  - `--gravity=<g>` or `-g` (non‑negative)
+  - `--radius=<r>` or `-r` (non‑negative)
+  - `--restitution=<e>` or `-e` (0..1)
+- Environment:
+  - `PHYSICS_G`, `PHYSICS_RADIUS`, `PHYSICS_RESTITUTION`
+- Other constants:
+  - `MaxParticles` = 100 (hard cap)
+  - Color scale avoids pair 1 (black) and uses 2..16
 
 ## Performance Notes
 
