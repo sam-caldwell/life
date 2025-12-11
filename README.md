@@ -1,9 +1,10 @@
 # Life + Physics (ncurses)
 
-Two small terminal simulations rendered with ncurses:
+Two small terminal simulations rendered with ncurses (plus a new nuclear variant):
 
 - `life`: An agent-based, threaded “life-like” simulation where autonomous actors move, eat, push, and spawn.
 - `physics`: A Newtonian particle toy with collisions, fragmentation, combination, and simple gravity.
+- `nuclear`: ASCII atoms (H..Pu) with simplified Coulomb EM, SR-lite, and approximate decay.
 
 Both apps draw a legend and status bar at the bottom and handle Ctrl‑C/Ctrl‑Z gracefully (terminal is restored).
 
@@ -28,8 +29,9 @@ class like Einstein, tinker like Shannon, and laugh like Maxwell.
 - Builds both `life` and `physics` in `./build/` directory.
 
 ## Run
-- To Run Life (agent-based): `./build/life`
-- To Run Physics (particles): `./build/physics`
+- To run Life (agent-based): `./build/life`
+- To run Physics (particles): `./build/physics`
+- To run Nuclear (atoms): `./build/nuclear`
 
 ## Tips
 
@@ -40,6 +42,7 @@ class like Einstein, tinker like Shannon, and laugh like Maxwell.
 ## Further Reading
 - [Life Internals](docs/life.md) : Documentation about the `life` program and how it works.
 - [Physics Internals](docs/physics.md) : Documentation about the `physics` program and how it works.
+- [Nuclear Internals](docs/nuclear.md) : Documentation about the `nuclear` program and how it works.
 
 ## License
 

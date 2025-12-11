@@ -1,4 +1,4 @@
-# Physics (Particles) — Details
+# Physics (Newtonian Mechanics) — Details
 
 This document describes the rules and inner workings of `physics`.
 
