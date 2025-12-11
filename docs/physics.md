@@ -42,6 +42,10 @@ No background thread: the main loop steps the world based on elapsed time.
 - Decay:
   - `Z` decays periodically into two `Y` children (mass split). Capacity enforced; if mass < 2, `Z` converts to `Y`
     without splitting.
+- Recycling:
+  - Mass that cannot be instantiated due to capacity or clamps, and energy dissipated by inelastic impacts/boundary
+    bounces, accumulates in hidden pools. When the mass pool reaches 100 or the energy pool reaches 200 (arbitrary
+    units), the world injects a new random `Z` particle using available mass and a velocity derived from the energy pool.
 
 ## Tunables
 - Command line:
@@ -51,12 +55,12 @@ No background thread: the main loop steps the world based on elapsed time.
 - Environment:
   - `PHYSICS_G`, `PHYSICS_RADIUS`, `PHYSICS_RESTITUTION`
 - Other constants:
-  - `MaxParticles` = 100 (hard cap)
+  - `MaxParticles` = 200 (hard cap)
   - Color scale avoids pair 1 (black) and uses 2..16
 
 ## Performance Notes
 
-- Collision detection is O(n²) at the current cap (100) which remains responsive on typical terminals. If you push the
+- Collision detection is O(n²) at the current cap (200) which remains responsive on typical terminals. If you push the
   cap higher, consider adding a uniform grid / spatial hashing broad phase.
 
 ## Safety and Cleanup

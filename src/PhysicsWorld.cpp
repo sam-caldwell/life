@@ -232,6 +232,9 @@ void PhysicsWorld::step(float dt) {
     // After decay, apply adjacency-based combining
     updateAdjacencyAndCombine();
 
+    // Attempt to recycle accumulated mass/energy into new Z particles
+    maybeSpawnFromPools();
+
     // Incremental draw
     {
         std::lock_guard<std::mutex> lock(mtx);
@@ -357,10 +360,30 @@ void PhysicsWorld::handleBoundary(float padding) {
     float maxy = (float)(h - 1) - padding;
     for (auto& p : particles) {
         if (!p.alive) continue;
-        if (p.x < minx) { p.x = minx; p.vx = -p.vx * bounceRestitution; }
-        if (p.x > maxx) { p.x = maxx; p.vx = -p.vx * bounceRestitution; }
-        if (p.y < miny) { p.y = miny; p.vy = -p.vy * bounceRestitution; }
-        if (p.y > maxy) { p.y = maxy; p.vy = -p.vy * bounceRestitution; }
+        if (p.x < minx) {
+            float vxb = p.vx;
+            p.x = minx; p.vx = -p.vx * bounceRestitution;
+            double dE = 0.5 * std::max(1, p.mass) * (vxb*vxb - p.vx*p.vx);
+            if (dE > 0) accumulateLostEnergy(dE);
+        }
+        if (p.x > maxx) {
+            float vxb = p.vx;
+            p.x = maxx; p.vx = -p.vx * bounceRestitution;
+            double dE = 0.5 * std::max(1, p.mass) * (vxb*vxb - p.vx*p.vx);
+            if (dE > 0) accumulateLostEnergy(dE);
+        }
+        if (p.y < miny) {
+            float vyb = p.vy;
+            p.y = miny; p.vy = -p.vy * bounceRestitution;
+            double dE = 0.5 * std::max(1, p.mass) * (vyb*vyb - p.vy*p.vy);
+            if (dE > 0) accumulateLostEnergy(dE);
+        }
+        if (p.y > maxy) {
+            float vyb = p.vy;
+            p.y = maxy; p.vy = -p.vy * bounceRestitution;
+            double dE = 0.5 * std::max(1, p.mass) * (vyb*vyb - p.vy*p.vy);
+            if (dE > 0) accumulateLostEnergy(dE);
+        }
     }
 }
 
@@ -474,7 +497,13 @@ void PhysicsWorld::handleCollisions() {
 
         // Enforce capacity: remove parents (net -2), then add children up to MaxParticles
         liveCount -= 2;
-        auto tryAdd = [&](const Particle& c){ if (c.mass >= 1 && liveCount < MaxParticles) { newParticles.push_back(c); ++liveCount; } };
+        auto tryAdd = [&](const Particle& c){
+            if (c.mass >= 1 && liveCount < MaxParticles) {
+                newParticles.push_back(c); ++liveCount;
+            } else {
+                if (c.mass > 0) accumulateLostMass((double)c.mass);
+            }
+        };
         // Only add non-zero mass children
         tryAdd(a1);
         tryAdd(a2);
@@ -513,6 +542,10 @@ void PhysicsWorld::handleCollisions() {
         float jy = jimp * c.ny;
         a.vx += jx / m1; a.vy += jy / m1;
         b.vx -= jx / m2; b.vy -= jy / m2;
+        // Dissipated energy along normal due to inelasticity
+        double mu = (m1 * m2) / (m1 + m2);
+        double dE = 0.5 * mu * (1.0 - (double)e * (double)e) * (double)rel * (double)rel;
+        if (dE > 0) accumulateLostEnergy(dE);
     }
 
     // Remove dead and append new particles
@@ -589,6 +622,9 @@ void PhysicsWorld::updateDecay() {
                 Particle c2 = makeChild(p, sym, m2, -ux*sep, -uy*sep);
                 c2.vx = -ux * 1.0f; c2.vy = -uy * 1.0f;
                 toAdd.push_back(c2); ++liveCount;
+            } else {
+                // Could not add second child due to capacity; accumulate its mass
+                accumulateLostMass((double)m2);
             }
         }
     }
@@ -684,8 +720,9 @@ void PhysicsWorld::updateAdjacencyAndCombine() {
                     int ibL = (B.symbol - 'A' + 1);
                     int sumL = iaL + ibL;
                     if (sumL > 26) sumL = 26;
-                    int massSum = A.mass + B.mass;
-                    if (massSum > 100) massSum = 100;
+                    int rawMassSum = A.mass + B.mass;
+                    int massSum = rawMassSum;
+                    if (massSum > 100) { accumulateLostMass((double)(massSum - 100)); massSum = 100; }
                     char sym = (char)('A' + (sumL - 1));
                     // Momentum-conserving velocity
                     float m1 = std::max(1, A.mass);
@@ -765,4 +802,58 @@ void PhysicsWorld::eraseParticleUnlocked(const Particle& p) {
 void PhysicsWorld::updateParticle(Particle& p, float dts) {
     p.x += p.vx * dts;
     p.y += p.vy * dts;
+}
+
+void PhysicsWorld::accumulateLostMass(double dm) {
+    if (dm > 0) massPool += dm;
+}
+
+void PhysicsWorld::accumulateLostEnergy(double de) {
+    if (de > 0) energyPool += de;
+}
+
+void PhysicsWorld::maybeSpawnFromPools() {
+    std::lock_guard<std::mutex> lock(mtx);
+    // Count live
+    size_t liveCount = 0; for (auto& p : particles) if (p.alive) ++liveCount;
+    if (liveCount >= MaxParticles) return;
+    if (massPool < MassSpawnUnit && energyPool < EnergySpawnUnit) return;
+
+    std::uniform_real_distribution<float> xDist(0.5f, std::max(0.5f, (float)w - 1.5f));
+    std::uniform_real_distribution<float> yDist(0.5f, std::max(0.5f, (float)h - 1.5f));
+    std::uniform_real_distribution<float> ang(0.0f, (float)M_PI * 2.0f);
+
+    while (liveCount < MaxParticles && (massPool >= MassSpawnUnit || energyPool >= EnergySpawnUnit)) {
+        int zMass = (int)std::floor(std::min(100.0, massPool));
+        if (zMass < 1) zMass = 1;
+        double consumeM = std::min(massPool, (double)zMass);
+        massPool -= consumeM;
+
+        double useE = 0.0;
+        if (energyPool >= EnergySpawnUnit) { useE = std::min(energyPool, EnergySpawnUnit); energyPool -= useE; }
+
+        float x = xDist(prng);
+        float y = yDist(prng);
+        float theta = ang(prng);
+        float ux = std::cos(theta);
+        float uy = std::sin(theta);
+        float speed = 0.0f;
+        if (useE > 0.0) {
+            speed = (float)std::sqrt(std::max(0.0, 2.0 * useE / (double)std::max(1, zMass)));
+            if (speed > 5.0f) speed = 5.0f;
+        }
+
+        Particle z;
+        z.id = nextId++;
+        z.symbol = 'Z';
+        z.mass = zMass;
+        z.elasticity10 = 8;
+        z.x = x; z.y = y;
+        z.vx = ux * speed; z.vy = uy * speed;
+        z.prev_ix = -1; z.prev_iy = -1;
+        z.alive = true;
+        z.decayTicks = 0;
+        particles.push_back(z);
+        ++liveCount;
+    }
 }

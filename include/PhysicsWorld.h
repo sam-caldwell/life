@@ -91,6 +91,9 @@ private:
     void updateDecay();
     void updateAdjacencyAndCombine();
     void updateParticle(struct Particle& p, float dts);
+    void maybeSpawnFromPools();
+    void accumulateLostMass(double dm);
+    void accumulateLostEnergy(double de);
 
     // Drawing helpers (callers hold mtx)
     void drawParticleUnlocked(const Particle& p);
@@ -131,7 +134,12 @@ private:
     float gravityG;               // gravitational constant
     float partRadius;             // particle radius (uniform)
     float bounceRestitution;      // near-elastic boundary bounces
-    static constexpr size_t MaxParticles = 100; // hard cap per requirements
+    static constexpr size_t MaxParticles = 200; // hard cap per requirements
+    // Recycling pools: accumulated losses due to constraints (mass) and dissipation (energy)
+    double massPool{0.0};
+    double energyPool{0.0};
+    static constexpr double MassSpawnUnit = 100.0;   // mass units to spawn a Z
+    static constexpr double EnergySpawnUnit = 200.0; // energy units to spawn a Z
 
     // Runtime clock (ms spent while running)
     long long runAccumMs{0};
