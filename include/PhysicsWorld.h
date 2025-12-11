@@ -134,7 +134,7 @@ private:
     float gravityG;               // gravitational constant
     float partRadius;             // particle radius (uniform)
     float bounceRestitution;      // near-elastic boundary bounces
-    static constexpr size_t MaxParticles = 200; // hard cap per requirements
+    static constexpr size_t MaxParticles = 300; // hard cap per requirements
     // Recycling pools: accumulated losses due to constraints (mass) and dissipation (energy)
     double massPool{0.0};
     double energyPool{0.0};

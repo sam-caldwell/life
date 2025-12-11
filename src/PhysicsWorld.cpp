@@ -55,14 +55,16 @@ void PhysicsWorld::clear() {
 }
 
 void PhysicsWorld::reseed(unsigned count) {
+    size_t cellCap = (size_t)std::max(0, w) * (size_t)std::max(0, h);
     if (count > MaxParticles) count = MaxParticles;
+    if (count > cellCap) count = (unsigned)cellCap;
     std::uniform_real_distribution<float> vxDist(-3.5f, 3.5f);
     std::uniform_real_distribution<float> vyDist(-2.0f, 2.0f);
     std::uniform_int_distribution<int> massDist(1, 100);
     std::uniform_int_distribution<int> symDist(0, 25);
     std::uniform_int_distribution<int> elastDist(0, 10);
-    std::uniform_real_distribution<float> xDist(0.5f, std::max(0.5f, (float)w - 1.5f));
-    std::uniform_real_distribution<float> yDist(0.5f, std::max(0.5f, (float)h - 1.5f));
+    std::uniform_int_distribution<int> ixDist(0, std::max(0, w - 1));
+    std::uniform_int_distribution<int> iyDist(0, std::max(0, h - 1));
 
     {
         std::lock_guard<std::mutex> lock(mtx);
@@ -72,11 +74,23 @@ void PhysicsWorld::reseed(unsigned count) {
         }
         particles.clear();
         particles.reserve(count);
-        for (unsigned i = 0; i < count; ++i) {
+        // Enforce unique screen cells on spawn
+        std::unordered_set<long long> occ;
+        occ.reserve(count * 2 + 16);
+        unsigned placed = 0;
+        int attempts = 0;
+        const int maxAttempts = (int)count * 50 + 500;
+        while (placed < count && attempts < maxAttempts) {
+            ++attempts;
+            int ix = ixDist(prng);
+            int iy = iyDist(prng);
+            long long key = ((long long)iy << 32) ^ (unsigned long long)ix;
+            if (occ.count(key)) continue;
+
             Particle p;
             p.id = nextId++;
-            p.x = xDist(prng);
-            p.y = yDist(prng);
+            p.x = (float)ix;
+            p.y = (float)iy;
             p.vx = vxDist(prng);
             p.vy = vyDist(prng);
             p.mass = massDist(prng);
@@ -85,6 +99,8 @@ void PhysicsWorld::reseed(unsigned count) {
             p.alive = true;
             p.elasticity10 = elastDist(prng);
             particles.push_back(p);
+            occ.insert(key);
+            ++placed;
         }
         if (win) wrefresh(win);
     }
@@ -94,8 +110,11 @@ void PhysicsWorld::reseedRandom() {
     // Random count 5%..15% of drawable cells, capped at MaxParticles
     int maxCount = std::max(10, (w * h) / 7);
     int minCount = std::max(5, (w * h) / 30);
+    int cellCapI = std::max(0, w) * std::max(0, h);
     if (maxCount > (int)MaxParticles) maxCount = (int)MaxParticles;
     if (minCount > (int)MaxParticles) minCount = (int)MaxParticles;
+    if (maxCount > cellCapI) maxCount = cellCapI;
+    if (minCount > cellCapI) minCount = cellCapI;
     if (minCount > maxCount) minCount = maxCount;
     std::uniform_int_distribution<int> cnt(minCount, maxCount);
     reseed((unsigned)cnt(prng));
@@ -848,9 +867,21 @@ void PhysicsWorld::accumulateLostEnergy(double de) {
 
 void PhysicsWorld::maybeSpawnFromPools() {
     std::lock_guard<std::mutex> lock(mtx);
-    // Count live
-    size_t liveCount = 0; for (auto& p : particles) if (p.alive) ++liveCount;
+    // Count live and build occupancy of current screen cells
+    size_t liveCount = 0; 
+    std::unordered_set<long long> occ;
+    occ.reserve(particles.size() * 2 + 16);
+    for (auto& p : particles) {
+        if (!p.alive) continue;
+        ++liveCount;
+        int ix = clampi((int)std::round(p.x), 0, w - 1);
+        int iy = clampi((int)std::round(p.y), 0, h - 1);
+        long long key = ((long long)iy << 32) ^ (unsigned long long)ix;
+        occ.insert(key);
+    }
+    const size_t totalCells = (size_t)w * (size_t)h;
     if (liveCount >= MaxParticles) return;
+    if (occ.size() >= totalCells) return; // screen full
     if (massPool < MassSpawnUnit && energyPool < EnergySpawnUnit) return;
 
     std::uniform_real_distribution<float> xDist(0.5f, std::max(0.5f, (float)w - 1.5f));
@@ -858,6 +889,18 @@ void PhysicsWorld::maybeSpawnFromPools() {
     std::uniform_real_distribution<float> ang(0.0f, (float)M_PI * 2.0f);
 
     while (liveCount < MaxParticles && (massPool >= MassSpawnUnit || energyPool >= EnergySpawnUnit)) {
+        // Find an empty screen cell for spawn (limited attempts)
+        bool found = false;
+        float x = 0.0f, y = 0.0f; int ix = 0, iy = 0;
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            x = xDist(prng); y = yDist(prng);
+            ix = clampi((int)std::round(x), 0, w - 1);
+            iy = clampi((int)std::round(y), 0, h - 1);
+            long long key = ((long long)iy << 32) ^ (unsigned long long)ix;
+            if (!occ.count(key)) { occ.insert(key); found = true; break; }
+        }
+        if (!found) break; // couldn't find empty cell this pass
+
         int zMass = (int)std::floor(std::min(100.0, massPool));
         if (zMass < 1) zMass = 1;
         double consumeM = std::min(massPool, (double)zMass);
@@ -866,8 +909,6 @@ void PhysicsWorld::maybeSpawnFromPools() {
         double useE = 0.0;
         if (energyPool >= EnergySpawnUnit) { useE = std::min(energyPool, EnergySpawnUnit); energyPool -= useE; }
 
-        float x = xDist(prng);
-        float y = yDist(prng);
         float theta = ang(prng);
         float ux = std::cos(theta);
         float uy = std::sin(theta);
@@ -882,12 +923,14 @@ void PhysicsWorld::maybeSpawnFromPools() {
         z.symbol = 'Z';
         z.mass = zMass;
         z.elasticity10 = 8;
-        z.x = x; z.y = y;
+        z.x = (float)ix; z.y = (float)iy; // snap to chosen empty screen cell
         z.vx = ux * speed; z.vy = uy * speed;
         z.prev_ix = -1; z.prev_iy = -1;
         z.alive = true;
         z.decayTicks = 0;
         particles.push_back(z);
         ++liveCount;
+
+        if (occ.size() >= totalCells) break; // no more empty cells
     }
 }

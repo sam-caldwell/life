@@ -58,7 +58,7 @@ No background thread: the main loop steps the world based on elapsed time.
 - Environment:
   - `PHYSICS_G`, `PHYSICS_RADIUS`, `PHYSICS_RESTITUTION`
 - Other constants:
-  - `MaxParticles` = 200 (hard cap)
+  - `MaxParticles` = 300 (hard cap)
   - Color scale avoids pair 1 (black) and uses 2..16
 
 ## Performance Notes
