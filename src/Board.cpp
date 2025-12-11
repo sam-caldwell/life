@@ -6,6 +6,7 @@
  */
 #include "Board.h"
 #include "Automaton.h"
+#include "Logger.h"
 
 #include <algorithm>
 #include <chrono>
@@ -28,6 +29,7 @@ Board::Board(int width, int height)
 /** @copydoc Board::~Board */
 Board::~Board() {
     quitting.store(true);
+    Logger::info("Board destructor: initiating clear and shutdown");
     clear();
 }
 
@@ -51,6 +53,7 @@ void Board::clear() {
         for (auto& a : automata) {
             if (a) a->requestStop();
         }
+        Logger::info("Board::clear: stopping automata count=" + std::to_string(automata.size()));
         toJoin = automata;
         automata.clear();
         for (auto& c : grid) c.occ.reset();
@@ -69,6 +72,7 @@ void Board::clear() {
 void Board::reseed(unsigned count) {
     clear();
     placeInitial(count);
+    Logger::info("Board::reseed: placed initial automata count=" + std::to_string(count));
 }
 
 /** @brief See Board::reseed; helper to place initial automata with random positions and traits. */
@@ -115,7 +119,23 @@ void Board::placeInitial(unsigned count) {
         grid[static_cast<size_t>(p)].occ = a;
         positions[a.get()] = {x, y};
         if (win) { drawCellUnlocked(x, y); }
-        a->start();
+        try {
+            a->start();
+        } catch (const std::exception& e) {
+            Logger::logException("Board::placeInitial start(Z) failed", e);
+            grid[static_cast<size_t>(p)].occ.reset();
+            positions.erase(a.get());
+            automata.pop_back();
+            if (win) { drawCellUnlocked(x, y); wrefresh(win); }
+            continue;
+        } catch (...) {
+            Logger::logUnknownException("Board::placeInitial start(Z) failed");
+            grid[static_cast<size_t>(p)].occ.reset();
+            positions.erase(a.get());
+            automata.pop_back();
+            if (win) { drawCellUnlocked(x, y); wrefresh(win); }
+            continue;
+        }
     }
 
     for (; idxPos < count; ++idxPos) {
@@ -129,7 +149,23 @@ void Board::placeInitial(unsigned count) {
         grid[static_cast<size_t>(p)].occ = a;
         positions[a.get()] = {x, y};
         if (win) { drawCellUnlocked(x, y); }
-        a->start();
+        try {
+            a->start();
+        } catch (const std::exception& e) {
+            Logger::logException("Board::placeInitial start failed", e);
+            grid[static_cast<size_t>(p)].occ.reset();
+            positions.erase(a.get());
+            automata.pop_back();
+            if (win) { drawCellUnlocked(x, y); wrefresh(win); }
+            continue;
+        } catch (...) {
+            Logger::logUnknownException("Board::placeInitial start failed");
+            grid[static_cast<size_t>(p)].occ.reset();
+            positions.erase(a.get());
+            automata.pop_back();
+            if (win) { drawCellUnlocked(x, y); wrefresh(win); }
+            continue;
+        }
     }
 }
 
@@ -244,7 +280,9 @@ bool Board::handlePush(const std::shared_ptr<Automaton>& actor,
     auto occ = dest.occ.lock();
     if (!occ) {
         // Simple case: move pushed target one step
-        return moveLocked(target, nx, ny);
+        bool ok = moveLocked(target, nx, ny);
+        if (ok) Logger::debug("push: " + std::string(1, actor->symbol()) + "->" + std::string(1, target->symbol()));
+        return ok;
     }
 
     // Destination occupied -> compute recoil rule
@@ -266,6 +304,7 @@ bool Board::handlePush(const std::shared_ptr<Automaton>& actor,
             moved = true;
             cx = rx; cy = ry;
         }
+        if (moved) Logger::debug("push-recoil: " + std::string(1, actor->symbol()) + "->" + std::string(1, target->symbol()));
         return moved;
     }
 
@@ -315,6 +354,8 @@ bool Board::handleEat(const std::shared_ptr<Automaton>& actor,
         if (target->threadId() != std::this_thread::get_id()) {
             target->join();
         }
+        Logger::info(std::string("eat: ") + actor->symbol() + " ate " + target->symbol() +
+                     ", newW=" + std::to_string(actor->weight()));
     }
     return success;
 }
@@ -351,7 +392,25 @@ bool Board::handleSpawn(const std::shared_ptr<Automaton>& actor,
     grid[static_cast<size_t>(idx(sx, sy, w))].occ = a;
     positions[a.get()] = {sx, sy};
     if (win) { drawCellUnlocked(sx, sy); wrefresh(win); }
-    a->start();
+    try {
+        a->start();
+    } catch (const std::exception& e) {
+        Logger::logException("Board::handleSpawn start failed", e);
+        grid[static_cast<size_t>(idx(sx, sy, w))].occ.reset();
+        positions.erase(a.get());
+        automata.pop_back();
+        if (win) { drawCellUnlocked(sx, sy); wrefresh(win); }
+        return false;
+    } catch (...) {
+        Logger::logUnknownException("Board::handleSpawn start failed");
+        grid[static_cast<size_t>(idx(sx, sy, w))].occ.reset();
+        positions.erase(a.get());
+        automata.pop_back();
+        if (win) { drawCellUnlocked(sx, sy); wrefresh(win); }
+        return false;
+    }
+    Logger::info(std::string("spawn: ") + actor->symbol() + " + " + partner->symbol() +
+                 " -> " + a->symbol() + " at (" + std::to_string(sx) + "," + std::to_string(sy) + ")");
     return true;
 }
 

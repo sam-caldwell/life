@@ -6,10 +6,12 @@
  */
 #include "Automaton.h"
 #include "Board.h"
+#include "Logger.h"
 
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <string>
 
 /** @copydoc Automaton::Automaton */
 Automaton::Automaton(Board& b, char symbol, short colorPair_, int weight)
@@ -59,73 +61,67 @@ bool Automaton::spawn(const std::shared_ptr<Automaton>& actor) {
 /** @brief Worker loop: sense -> decide -> act -> sleep, until stopped or removed. */
 void Automaton::run() {
     using namespace std::chrono;
-    std::vector<std::shared_ptr<Automaton>> neighbors;
+    std::shared_ptr<Automaton> self;
+    try {
+        Logger::debug("automaton thread starting: sym=" + std::string(1, sym));
+        std::vector<std::shared_ptr<Automaton>> neighbors;
+        self = shared_from_this();
 
-    // Keep self alive for the duration of the thread
-    auto self = shared_from_this();
-
-    while (isAlive()) {
-        if (!board.isRunning()) {
-            std::this_thread::sleep_for(10ms);
-            continue;
-        }
-
-        int x=-1,y=-1;
-        if (!board.tryGetPosition(shared_from_this(), x, y)) {
-            // Not on the board anymore
-            requestStop();
-            break;
-        }
-
-        // Single neighbor query: get state of 8 neighbors in one call
-        std::vector<Board::NeighborInfo> ninfo;
-        if (!board.neighborQuery(self, ninfo, x, y)) {
-            requestStop();
-            break;
-        }
-
-        // First: flee predators (neighbors that can eat me); movement chance decreases with weight
-        bool fled = false;
-        std::vector<Board::NeighborInfo> predators;
-        // Flee from other species that could eat us by species order (higher letter), regardless of weight
-        for (auto& ni : ninfo) if (ni.occupied && ni.symbol != sym && ni.symbol > sym) predators.push_back(ni);
-        double moveProb = std::max(0.0, std::min(1.0, (100.0 - (double)wt.load()) / 100.0));
-        if (!predators.empty() && board.rand01() < moveProb) {
-            // Choose one predator and move one cardinal step away
-            auto& pred = predators[(size_t)board.randInt(0, (int)predators.size()-1)];
-            int dx = -pred.dx; // away
-            int dy = -pred.dy;
-            // pick cardinal axis away
-            int sdx = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
-            int sdy = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
-            int mdx = 0, mdy = 0;
-            if (std::abs(dx) > std::abs(dy)) { mdx = sdx; mdy = 0; }
-            else if (std::abs(dy) > std::abs(dx)) { mdx = 0; mdy = sdy; }
-            else { if (board.randInt(0,1)==0) { mdx = sdx; mdy = 0; } else { mdx = 0; mdy = sdy; } }
-            fled = board.moveAutomaton(self, mdx, mdy);
-        }
-        if (fled) {
-            // Hunger update
-            double lf = board.loadFactor();
-            int period = std::max(1, 10 - static_cast<int>(8 * lf));
-            int dec = 1 + static_cast<int>(2 * lf);
-            cyclesSinceEat++;
-            if (cyclesSinceEat >= period) {
-                wt.fetch_sub(dec);
-                cyclesSinceEat = 0;
+        while (isAlive()) {
+            if (!board.isRunning()) {
+                std::this_thread::sleep_for(10ms);
+                continue;
             }
-            if (wt.load() <= 0) {
-                board.removeAutomaton(self);
+
+            int x=-1,y=-1;
+            if (!board.tryGetPosition(shared_from_this(), x, y)) {
                 requestStop();
                 break;
             }
-            std::this_thread::sleep_for(milliseconds(board.getStepDelayMs()));
-            continue;
-        }
 
-        bool ateThisCycle = false;
-        if (!ninfo.empty()) {
-            int myW = wt.load();
+            std::vector<Board::NeighborInfo> ninfo;
+            if (!board.neighborQuery(self, ninfo, x, y)) {
+                requestStop();
+                break;
+            }
+
+            bool fled = false;
+            std::vector<Board::NeighborInfo> predators;
+            for (auto& ni : ninfo) if (ni.occupied && ni.symbol != sym && ni.symbol > sym) predators.push_back(ni);
+            double moveProb = std::max(0.0, std::min(1.0, (100.0 - (double)wt.load()) / 100.0));
+            if (!predators.empty() && board.rand01() < moveProb) {
+                auto& pred = predators[(size_t)board.randInt(0, (int)predators.size()-1)];
+                int dx = -pred.dx;
+                int dy = -pred.dy;
+                int sdx = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
+                int sdy = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
+                int mdx = 0, mdy = 0;
+                if (std::abs(dx) > std::abs(dy)) { mdx = sdx; mdy = 0; }
+                else if (std::abs(dy) > std::abs(dx)) { mdx = 0; mdy = sdy; }
+                else { if (board.randInt(0,1)==0) { mdx = sdx; mdy = 0; } else { mdx = 0; mdy = sdy; } }
+                fled = board.moveAutomaton(self, mdx, mdy);
+            }
+            if (fled) {
+                double lf = board.loadFactor();
+                int period = std::max(1, 10 - static_cast<int>(8 * lf));
+                int dec = 1 + static_cast<int>(2 * lf);
+                cyclesSinceEat++;
+                if (cyclesSinceEat >= period) {
+                    wt.fetch_sub(dec);
+                    cyclesSinceEat = 0;
+                }
+                if (wt.load() <= 0) {
+                    board.removeAutomaton(self);
+                    requestStop();
+                    break;
+                }
+                std::this_thread::sleep_for(milliseconds(board.getStepDelayMs()));
+                continue;
+            }
+
+            bool ateThisCycle = false;
+            if (!ninfo.empty()) {
+                int myW = wt.load();
             bool ateRecently = (cyclesSinceEat < 10);
 
             // Prefer eating valid prey
@@ -301,5 +297,17 @@ void Automaton::run() {
         if (spawnBackoffTTL > 0) --spawnBackoffTTL;
 
         std::this_thread::sleep_for(milliseconds(board.getStepDelayMs()));
+        }
+        Logger::debug("automaton thread exiting normally: sym=" + std::string(1, sym));
+    } catch (const std::exception& e) {
+        alive.store(false);
+        try { if (self) board.removeAutomaton(self); } catch (...) {}
+        try { board.setStatusNote(std::string("thread error: ") + e.what()); } catch (...) {}
+        Logger::error(std::string("automaton exception: ") + e.what());
+    } catch (...) {
+        alive.store(false);
+        try { if (self) board.removeAutomaton(self); } catch (...) {}
+        try { board.setStatusNote("thread error: unknown"); } catch (...) {}
+        Logger::error("automaton exception: unknown");
     }
 }

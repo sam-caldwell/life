@@ -1,0 +1,11 @@
+===== session start 2025-12-10 22:27:06.624 =====
+2025-12-10 22:27:06.625 [INFO] [t:0x2094b6080] physics starting
+2025-12-10 22:27:06.628 [INFO] [t:0x2094b6080] physics reseed: count=10
+2025-12-10 22:27:08.453 [INFO] [t:0x2094b6080] running = true
+===== session start 2025-12-10 22:35:41.603 =====
+2025-12-10 22:35:41.604 [INFO] [t:0x2094b6080] physics starting
+2025-12-10 22:35:41.605 [INFO] [t:0x2094b6080] physics reseed: count=1
+2025-12-10 22:35:45.687 [INFO] [t:0x2094b6080] reseed random
+2025-12-10 22:42:52.157 [INFO] [t:0x2094b6080] quit requested
+2025-12-10 22:42:52.177 [INFO] [t:0x2094b6080] physics terminating
+===== session end   2025-12-10 22:42:52.177 =====

@@ -7,14 +7,57 @@
 #include <thread>
 #include <csignal>
 #include <cstdlib>
+#include <exception>
 #include <cstring>
 #include <string>
 #include <cerrno>
 #include <random>
 #include "PhysicsWorld.h"
+#include "Logger.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static void handle_signal(int) { g_stop = 1; }
+
+// Forward decl for signal handler
+static void init_colors_physics();
+
+static bool g_curses_inited = false;
+static volatile sig_atomic_t g_needs_full_redraw = 0;
+static void atexit_cleanup() {
+    if (g_curses_inited) {
+        endwin();
+        g_curses_inited = false;
+    }
+}
+
+// Suspend: restore tty, then stop process with default action
+static void handle_sigtstp(int) {
+    if (g_curses_inited) {
+        def_prog_mode();
+        endwin();
+        g_curses_inited = false;
+    }
+    struct sigaction sa{}; sa.sa_handler = SIG_DFL; sigemptyset(&sa.sa_mask); sa.sa_flags = 0; sigaction(SIGTSTP, &sa, nullptr);
+    raise(SIGTSTP);
+}
+
+// Resume: restore curses state and redraw
+static void handle_sigcont(int) {
+    struct sigaction st{}; st.sa_handler = handle_sigtstp; sigemptyset(&st.sa_mask); st.sa_flags = 0; sigaction(SIGTSTP, &st, nullptr);
+    reset_prog_mode();
+    refresh();
+    cbreak();
+    noecho();
+    curs_set(0);
+    keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);
+    timeout(0);
+    init_colors_physics();
+    clearok(stdscr, TRUE);
+    refresh();
+    g_curses_inited = true;
+    g_needs_full_redraw = 1;
+}
 
 static void init_colors_physics() {
     if (!has_colors()) return;
@@ -52,14 +95,36 @@ static bool parseFloat(const char* s, float& out) {
 }
 
 int main(int argc, char** argv) {
+    Logger::initFromArgv0((argc > 0) ? argv[0] : "physics");
+    Logger::info("physics starting");
+    std::set_terminate([]{
+        try {
+            auto ep = std::current_exception();
+            if (ep) {
+                try { std::rethrow_exception(ep); }
+                catch (const std::exception& e) { Logger::logException("std::terminate (physics)", e); }
+                catch (...) { Logger::logUnknownException("std::terminate (physics)"); }
+            } else {
+                Logger::error("std::terminate (physics): no active exception");
+            }
+        } catch (...) {}
+        if (g_curses_inited) { endwin(); }
+        Logger::shutdown();
+        std::_Exit(1);
+    });
+    try {
     struct sigaction sa{};
     sa.sa_handler = handle_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
+    struct sigaction st{}; st.sa_handler = handle_sigtstp; sigemptyset(&st.sa_mask); st.sa_flags = 0; sigaction(SIGTSTP, &st, nullptr);
+    struct sigaction sc{}; sc.sa_handler = handle_sigcont; sigemptyset(&sc.sa_mask); sc.sa_flags = 0; sigaction(SIGCONT, &sc, nullptr);
 
     initscr();
+    g_curses_inited = true;
+    std::atexit(atexit_cleanup);
     cbreak();
     noecho();
     curs_set(0);
@@ -71,7 +136,7 @@ int main(int argc, char** argv) {
     int rows, cols; getmaxyx(stdscr, rows, cols);
     int gridH = rows - 1;
     int gridW = cols;
-    if (gridH < 1 || gridW < 1) { endwin(); return 1; }
+    if (gridH < 1 || gridW < 1) { Logger::error("terminal too small"); endwin(); Logger::shutdown(); return 1; }
 
     // Defaults
     float gravity = 9.8f;
@@ -123,7 +188,9 @@ int main(int argc, char** argv) {
         int cap = (int)std::min<size_t>(20, world.maxParticles());
         if (cap < 1) cap = 1;
         std::uniform_int_distribution<int> d(1, cap);
-        world.reseed((unsigned)d(gen));
+        unsigned n = (unsigned)d(gen);
+        world.reseed(n);
+        Logger::info("physics reseed: count=" + std::to_string(n));
     }
     world.drawAll(stdscr);
     world.drawStatusLine(stdscr);
@@ -134,6 +201,11 @@ int main(int argc, char** argv) {
     auto lastStep = steady_clock::now();
     while (!done) {
         if (g_stop) done = true;
+        if (g_needs_full_redraw) {
+            world.drawAll(stdscr);
+            world.drawStatusLine(stdscr);
+            g_needs_full_redraw = 0;
+        }
         // Run simulation step based on elapsed time and configured cadence
         if (world.isRunning()) {
             auto now = steady_clock::now();
@@ -153,19 +225,19 @@ int main(int argc, char** argv) {
         int ch = getch();
         switch (ch) {
             case 'q': case 'Q':
-                done = true; break;
+                Logger::info("quit requested"); done = true; break;
             case 's': case 'S':
-                world.toggleRunning(); break;
+                world.toggleRunning(); Logger::info(std::string("running = ") + (world.isRunning()?"true":"false")); break;
             case 'p': case 'P':
-                world.setRunning(false); break;
+                world.setRunning(false); Logger::info("paused"); break;
             case 'r': case 'R':
-                world.reseedRandom(); world.drawAll(stdscr); break;
+                world.reseedRandom(); world.drawAll(stdscr); Logger::info("reseed random"); break;
             case 'c': case 'C':
-                world.setRunning(false); world.clear(); break;
+                world.setRunning(false); world.clear(); Logger::info("clear requested"); break;
             case '+':
-                world.setStepDelayMs(world.getStepDelayMs() - 5); break;
+                world.setStepDelayMs(world.getStepDelayMs() - 5); Logger::info("delay set(ms): " + std::to_string(world.getStepDelayMs())); break;
             case '-':
-                world.setStepDelayMs(world.getStepDelayMs() + 5); break;
+                world.setStepDelayMs(world.getStepDelayMs() + 5); Logger::info("delay set(ms): " + std::to_string(world.getStepDelayMs())); break;
             default:
                 break;
         }
@@ -173,5 +245,19 @@ int main(int argc, char** argv) {
     }
 
     endwin();
+    g_curses_inited = false;
+    Logger::info("physics terminating");
+    Logger::shutdown();
     return 0;
+    } catch (const std::exception& e) {
+        if (g_curses_inited) { endwin(); g_curses_inited = false; }
+        Logger::logException("unhandled exception (physics)", e);
+        Logger::shutdown();
+        return 2;
+    } catch (...) {
+        if (g_curses_inited) { endwin(); g_curses_inited = false; }
+        Logger::logUnknownException("unhandled exception (physics)");
+        Logger::shutdown();
+        return 2;
+    }
 }

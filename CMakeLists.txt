@@ -15,6 +15,7 @@ add_executable(life
     cmd/life/main.cpp
     src/Board.cpp
     src/Automaton.cpp
+    src/Logger.cpp
 )
 
 target_include_directories(life PRIVATE include)
@@ -40,6 +41,7 @@ endif()
 add_executable(physics
     cmd/physics/main.cpp
     src/PhysicsWorld.cpp
+    src/Logger.cpp
 )
 
 target_include_directories(physics PRIVATE include)
