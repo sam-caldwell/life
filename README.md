@@ -7,6 +7,12 @@ Two small terminal simulations rendered with ncurses:
 
 Both apps draw a legend and status bar at the bottom and handle Ctrl‑C/Ctrl‑Z gracefully (terminal is restored).
 
+## Dedication
+
+This project is dedicated to Claude Shannon, Ludwig Boltzmann, and all the other minds who saw science as a playground
+rather than a career; who encouraged us to tinker and explore rather than memorize. May we all skip an occasional
+class like Einstein, tinker like Shannon, and laugh like Maxwell.
+
 ## Requirements
 
 - CMake 3.16+
