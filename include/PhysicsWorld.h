@@ -300,4 +300,7 @@ private:
     inline void markCollisionAtCell(int ix, int iy) {
         if (ix<0||ix>=w||iy<0||iy>=h) return; size_t idx=(size_t)iy*(size_t)w+(size_t)ix; if (idx<highlightGrid.size()) highlightGrid[idx]=2;
     }
+    inline void markSplit3x3AtCell(int ix, int iy) {
+        for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) markSplitAtCell(ix+dx, iy+dy);
+    }
 };

@@ -646,10 +646,11 @@ void PhysicsWorld::updateDecaySoA() {
             if (allowNew >= need) {
                 allowNew -= need; acceptedKills.push_back(pi);
                 auto& vec = it->second; acceptedKids.insert(acceptedKids.end(), vec.begin(), vec.end());
-                // Mark split highlight at parent's cell
+                // Mark split highlight at parent's cell; if this is a four-way decay of 'Z', highlight 3x3
                 int ix = clampi((int)std::round(soa_x[pi]), 0, w - 1);
                 int iy = clampi((int)std::round(soa_y[pi]), 0, h - 1);
-                markSplitAtCell(ix, iy);
+                if (childCount == 4 && soa_sym[pi] == 'Z') markSplit3x3AtCell(ix, iy);
+                else markSplitAtCell(ix, iy);
             }
         }
         for (size_t idx : acceptedKills) soa_alive[idx] = 0;
