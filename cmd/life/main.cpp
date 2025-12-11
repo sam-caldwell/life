@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief Entry point: initializes ncurses, installs signal handlers, runs UI loop and graceful shutdown.
+ * @brief Classic Life entry: initializes ncurses, installs signal handlers, runs UI loop and graceful shutdown.
  *
  * @copyright Copyright (c) 2025 Sam Caldwell. Released under the MIT License.
  */
