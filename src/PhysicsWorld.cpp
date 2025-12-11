@@ -58,7 +58,7 @@ void PhysicsWorld::reseed(unsigned count) {
     if (count > MaxParticles) count = MaxParticles;
     std::uniform_real_distribution<float> vxDist(-3.5f, 3.5f);
     std::uniform_real_distribution<float> vyDist(-2.0f, 2.0f);
-    std::uniform_int_distribution<int> massDist(0, 100);
+    std::uniform_int_distribution<int> massDist(1, 100);
     std::uniform_int_distribution<int> symDist(0, 25);
     std::uniform_int_distribution<int> elastDist(0, 10);
     std::uniform_real_distribution<float> xDist(0.5f, std::max(0.5f, (float)w - 1.5f));
@@ -127,10 +127,14 @@ size_t PhysicsWorld::particleCount() const {
 }
 
 int PhysicsWorld::colorPairForMass(int m) const {
-    // Map [0,100] -> 16 buckets: 0..15 then +1 for pair id
+    // Map [0,100] -> 16 buckets: 0..15 then shift to pairs 2..16 to avoid black (pair 1)
+    if (m < 0) m = 0; if (m > 100) m = 100;
     int bucket = (int)std::floor((m / 100.0) * 16.0);
     if (bucket < 0) bucket = 0; if (bucket > 15) bucket = 15;
-    return bucket + 1; // 1..16
+    int pair = bucket + 1; // 1..16
+    if (pair < 2) pair = 2; // avoid pair 1 (black)
+    if (pair > 16) pair = 16;
+    return pair;
 }
 
 void PhysicsWorld::drawStatusLine(WINDOW* w_) {
@@ -145,7 +149,7 @@ void PhysicsWorld::drawStatusLine(WINDOW* w_) {
     mvwprintw(ww, y, x, "M:"); x += 2;
     for (int i = 0; i < 16; ++i) {
         int m = (int)std::round((i / 15.0) * 100.0);
-        int pair = i + 1;
+        int pair = std::max(2, i + 1); // skip black in legend
         bool bold = (i >= 8);
         if (bold) wattron(ww, A_BOLD);
         wattron(ww, COLOR_PAIR(pair));
@@ -424,6 +428,8 @@ void PhysicsWorld::handleCollisions() {
 
     std::vector<Particle> newParticles;
     newParticles.reserve(toFragment.size() * 4);
+    // Track live count to enforce MaxParticles capacity during fragmentation
+    size_t liveCount = 0; for (auto& p : particles) if (p.alive) ++liveCount;
     for (auto [i,j] : toFragment) {
         if (deadIdx.count(i) || deadIdx.count(j)) continue;
         auto& a = particles[i];
@@ -449,19 +455,31 @@ void PhysicsWorld::handleCollisions() {
         // For a
         Particle a1 = spawnChild(a, tx * sep, ty * sep);
         Particle a2 = spawnChild(a, -tx * sep, -ty * sep);
-        // Mass split
+        // Mass split with minimum 1 per child when possible
         a1.mass = a.mass / 2;
         a2.mass = a.mass - a1.mass;
+        if (a.mass >= 2) {
+            if (a1.mass < 1) { a1.mass = 1; a2.mass = a.mass - 1; }
+            if (a2.mass < 1) { a2.mass = 1; a1.mass = a.mass - 1; }
+        }
         // For b
         Particle b1 = spawnChild(b, tx * sep, ty * sep);
         Particle b2 = spawnChild(b, -tx * sep, -ty * sep);
         b1.mass = b.mass / 2;
         b2.mass = b.mass - b1.mass;
+        if (b.mass >= 2) {
+            if (b1.mass < 1) { b1.mass = 1; b2.mass = b.mass - 1; }
+            if (b2.mass < 1) { b2.mass = 1; b1.mass = b.mass - 1; }
+        }
 
-        newParticles.push_back(a1);
-        newParticles.push_back(a2);
-        newParticles.push_back(b1);
-        newParticles.push_back(b2);
+        // Enforce capacity: remove parents (net -2), then add children up to MaxParticles
+        liveCount -= 2;
+        auto tryAdd = [&](const Particle& c){ if (c.mass >= 1 && liveCount < MaxParticles) { newParticles.push_back(c); ++liveCount; } };
+        // Only add non-zero mass children
+        tryAdd(a1);
+        tryAdd(a2);
+        tryAdd(b1);
+        tryAdd(b2);
     }
 
     // Resolve remaining contacts with collision response (skip dead pairs)
@@ -521,7 +539,7 @@ void PhysicsWorld::updateDecay() {
         Particle c;
         c.id = nextId++;
         c.symbol = sym;
-        c.mass = std::max(0, std::min(100, mass));
+        c.mass = std::max(1, std::min(100, mass));
         c.elasticity10 = parent.elasticity10;
         c.x = parent.x + offx;
         c.y = parent.y + offy;
@@ -546,6 +564,7 @@ void PhysicsWorld::updateDecay() {
         if (p.symbol == 'Z') {
             // Z -> 2xY (if capacity allows)
             if (liveCount >= MaxParticles) continue; // cannot add more
+            if (p.mass < 2) { p.symbol = 'Y'; continue; }
             char sym = 'Y';
             int m1 = p.mass / 2;
             int m2 = p.mass - m1;

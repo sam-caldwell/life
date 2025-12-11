@@ -183,7 +183,7 @@ private:
     mutable std::mutex mtx; /**< global board mutex protecting state and drawing */
     std::atomic<bool> running{false}; /**< run/pause flag */
     std::atomic<bool> quitting{false}; /**< reserved for future use */
-    std::atomic<int> stepDelayMs{150}; /**< per-automaton sleep delay (ms) */
+    std::atomic<int> stepDelayMs{250}; /**< per-automaton sleep delay (ms) */
 
     std::random_device rd; /**< entropy for PRNG seeding */
     std::mt19937 prng;     /**< board PRNG */

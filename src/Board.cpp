@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <array>
+#include <cstdlib>
 #include <thread>
 
 namespace {
@@ -23,7 +24,26 @@ Board::Board(int width, int height)
     : w(width), h(height), grid(static_cast<size_t>(width * height)), prng(rd()) {
     unsigned int cores = std::thread::hardware_concurrency();
     if (cores == 0) cores = 1;
-    maxAutomataCap = static_cast<size_t>(cores) * 200ULL;
+    // Allow tuning via env vars; defaults to 20 threads per core.
+    size_t perCore = 20;
+    if (const char* tpc = std::getenv("LIFE_THREADS_PER_CORE")) {
+        long v = std::strtol(tpc, nullptr, 10);
+        if (v > 0 && v < 100000) perCore = (size_t)v;
+    }
+    size_t cap = (size_t)cores * perCore;
+    if (const char* absCap = std::getenv("LIFE_MAX_AUTOMATA")) {
+        long v = std::strtol(absCap, nullptr, 10);
+        if (v > 0) cap = (size_t)v;
+    }
+    // Do not exceed grid cells
+    size_t cells = (size_t)width * (size_t)height;
+    if (cap > cells) cap = cells;
+    maxAutomataCap = cap;
+    // Optional default step delay override
+    if (const char* sd = std::getenv("LIFE_STEP_DELAY_MS")) {
+        int v = (int)std::strtol(sd, nullptr, 10);
+        if (v >= 5 && v <= 10000) stepDelayMs.store(v);
+    }
 }
 
 /** @copydoc Board::~Board */
@@ -354,8 +374,8 @@ bool Board::handleEat(const std::shared_ptr<Automaton>& actor,
         if (target->threadId() != std::this_thread::get_id()) {
             target->join();
         }
-        Logger::info(std::string("eat: ") + actor->symbol() + " ate " + target->symbol() +
-                     ", newW=" + std::to_string(actor->weight()));
+        Logger::debug(std::string("eat: ") + actor->symbol() + " ate " + target->symbol() +
+                      ", newW=" + std::to_string(actor->weight()));
     }
     return success;
 }
@@ -409,8 +429,8 @@ bool Board::handleSpawn(const std::shared_ptr<Automaton>& actor,
         if (win) { drawCellUnlocked(sx, sy); wrefresh(win); }
         return false;
     }
-    Logger::info(std::string("spawn: ") + actor->symbol() + " + " + partner->symbol() +
-                 " -> " + a->symbol() + " at (" + std::to_string(sx) + "," + std::to_string(sy) + ")");
+    Logger::debug(std::string("spawn: ") + actor->symbol() + " + " + partner->symbol() +
+                  " -> " + a->symbol() + " at (" + std::to_string(sx) + "," + std::to_string(sy) + ")");
     return true;
 }
 
