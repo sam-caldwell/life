@@ -31,6 +31,10 @@ Both apps draw a legend and status bar at the bottom and handle Ctrl‑C/Ctrl‑
 - If rendering looks odd after suspend/resume, the app will force a full redraw on resume.
 - Log verbosity is controlled by `LOG_LEVEL` (`debug|info|warn|error|none`). Default is `info`.
 
+## Further Reading
+- [Life Internals](docs/life.md) : Documentation about the `life` program and how it works.
+- [Physics Internals](docs/physics.md) : Documentation about the `physics` program and how it works.
+
 ## License
 
 MIT — see `LICENSE.txt`.

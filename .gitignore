@@ -10,3 +10,4 @@ cmake-build-*/
 /life
 /*.exe
 /*.out
+*.log
