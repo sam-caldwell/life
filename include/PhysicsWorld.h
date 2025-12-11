@@ -241,6 +241,17 @@ private:
     };
     std::vector<QuadNode> quadTree;
     float bhTheta{0.6f};
+    std::mutex qtMtx;
+
+    // LBVH nodes (binary tree)
+    struct BVHNode {
+        float minx, miny, maxx, maxy;
+        double mass; double cx, cy;
+        int left;  // child index or -1
+        int right; // child index or -1
+        int leaf;  // particle index or -1
+    };
+    std::vector<BVHNode> bvhNodes;
     std::vector<std::pair<size_t,size_t>> fragSchedule;
 
     // SoA storage (groundwork for refactor)

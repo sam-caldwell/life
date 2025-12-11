@@ -332,19 +332,45 @@ void PhysicsWorld::step(float dt) {
 }
 
 void PhysicsWorld::applyGravityBarnesHutSoA(float dt) {
-    // Build quadtree from SoA
-    quadTree.clear(); quadTree.reserve(soa_x.size() * 4);
-    auto makeNode = [&](float minx, float miny, float maxx, float maxy) -> int { QuadNode n{}; n.minx=minx; n.miny=miny; n.maxx=maxx; n.maxy=maxy; n.mass=0; n.cx=0; n.cy=0; n.particleIndex=-1; n.child[0]=n.child[1]=n.child[2]=n.child[3]=-1; quadTree.push_back(n); return (int)quadTree.size()-1; };
-    int root = makeNode(0.0f, 0.0f, std::max(1.0f, (float)w), std::max(1.0f, (float)h));
-    auto quadrant = [](const QuadNode& n, float x, float y){ float mx=(n.minx+n.maxx)*0.5f, my=(n.miny+n.maxy)*0.5f; int q=(y<my?0:2)+(x<mx?0:1); return q; };
-    std::function<void(int,size_t)> insert = [&](int nodeIdx, size_t pi){ QuadNode& nd = quadTree[nodeIdx]; if (nd.particleIndex < 0 && nd.child[0] < 0) { nd.particleIndex = (int)pi; return; } if (nd.child[0] < 0) { float mx=(nd.minx+nd.maxx)*0.5f, my=(nd.miny+nd.maxy)*0.5f; nd.child[0]=makeNode(nd.minx,nd.miny,mx,my); nd.child[1]=makeNode(mx,nd.miny,nd.maxx,my); nd.child[2]=makeNode(nd.minx,my,mx,nd.maxy); nd.child[3]=makeNode(mx,my,nd.maxx,nd.maxy); if (nd.particleIndex>=0){ size_t op=(size_t)nd.particleIndex; int q=quadrant(nd, soa_x[op], soa_y[op]); insert(nd.child[q], op); nd.particleIndex=-1; } } int q=quadrant(nd, soa_x[pi], soa_y[pi]); insert(nd.child[q], pi); };
-    for (size_t i=0;i<soa_x.size();++i) if (soa_alive[i]) insert(root,i);
-    std::function<void(int)> accumulate = [&](int idx){ QuadNode& nd = quadTree[idx]; if (nd.child[0] < 0) { if (nd.particleIndex >= 0) { size_t pi=(size_t)nd.particleIndex; nd.mass = std::max(0,(int)soa_mass[pi]); nd.cx = soa_x[pi]; nd.cy = soa_y[pi]; } else { nd.mass=0; nd.cx=nd.cy=0; } return; } double m=0,cx=0,cy=0; for (int k=0;k<4;++k) if (nd.child[k]>=0){ accumulate(nd.child[k]); auto& c=quadTree[nd.child[k]]; m+=c.mass; cx+=c.mass*c.cx; cy+=c.mass*c.cy; } nd.mass=m; if (m>0){ nd.cx=cx/m; nd.cy=cy/m; } else { nd.cx=nd.cy=0; } };
-    accumulate(root);
-    auto sizeOf = [](const QuadNode& n){ return std::max(n.maxx - n.minx, n.maxy - n.miny); };
+    // Build LBVH over alive particles (binary tree) using Morton ordering and median splits
+    bvhNodes.clear(); bvhNodes.reserve(std::max<size_t>(64, soa_x.size() * 2));
+    auto makeNode = [&](){ BVHNode n{}; n.minx=1e9f; n.miny=1e9f; n.maxx=-1e9f; n.maxy=-1e9f; n.mass=0; n.cx=0; n.cy=0; n.left=-1; n.right=-1; n.leaf=-1; bvhNodes.push_back(n); return (int)bvhNodes.size()-1; };
+    // Build index list of alive particles and sort by Morton code for locality
+    auto morton2d = [&](uint32_t x, uint32_t y){
+        auto part1by1 = [](uint32_t n){ n = (n | (n << 8)) & 0x00FF00FFu; n = (n | (n << 4)) & 0x0F0F0F0Fu; n = (n | (n << 2)) & 0x33333333u; n = (n | (n << 1)) & 0x55555555u; return n; };
+        return (part1by1(y) << 1) | part1by1(x);
+    };
+    std::vector<size_t> aliveIdx; aliveIdx.reserve(soa_id.size());
+    for (size_t i=0;i<soa_id.size();++i) if (soa_alive[i]) aliveIdx.push_back(i);
+    std::vector<std::pair<uint32_t,size_t>> mort; mort.reserve(aliveIdx.size());
+    for (size_t i : aliveIdx) {
+        int ix = clampi((int)std::round(soa_x[i]), 0, w - 1);
+        int iy = clampi((int)std::round(soa_y[i]), 0, h - 1);
+        mort.emplace_back(morton2d((uint32_t)ix, (uint32_t)iy), i);
+    }
+    std::sort(mort.begin(), mort.end(), [](auto& a, auto& b){ return a.first < b.first; });
+    aliveIdx.clear(); aliveIdx.reserve(mort.size()); for (auto& p : mort) aliveIdx.push_back(p.second);
+    std::function<int(int,int)> build = [&](int lo, int hi)->int {
+        int node = makeNode();
+        if (hi - lo == 1) {
+            size_t pi = aliveIdx[lo];
+            BVHNode& nd = bvhNodes[node]; nd.leaf = (int)pi; nd.minx = nd.maxx = soa_x[pi]; nd.miny = nd.maxy = soa_y[pi]; nd.mass = std::max(0,(int)soa_mass[pi]); nd.cx = soa_x[pi]; nd.cy = soa_y[pi]; return node;
+        }
+        int mid = (lo + hi) >> 1;
+        int L = build(lo, mid);
+        int R = build(mid, hi);
+        BVHNode& nd = bvhNodes[node]; nd.left = L; nd.right = R;
+        auto& a = bvhNodes[L]; auto& b = bvhNodes[R];
+        nd.minx = std::min(a.minx, b.minx); nd.miny = std::min(a.miny, b.miny);
+        nd.maxx = std::max(a.maxx, b.maxx); nd.maxy = std::max(a.maxy, b.maxy);
+        nd.mass = a.mass + b.mass; if (nd.mass > 0) { nd.cx = (a.mass*a.cx + b.mass*b.cx)/nd.mass; nd.cy = (a.mass*a.cy + b.mass*b.cy)/nd.mass; } else { nd.cx=nd.cy=0; }
+        return node;
+    };
+    int root = -1; if (!aliveIdx.empty()) root = build(0, (int)aliveIdx.size());
+    auto sizeOf = [](const BVHNode& n){ return std::max(n.maxx - n.minx, n.maxy - n.miny); };
     parallelFor(soa_x.size(), [&](size_t begin, size_t end, int){
         for (size_t i=begin;i<end;++i) {
-            if (!soa_alive[i]) continue; float ax=0.0f, ay=0.0f; std::function<void(int)> forceRec = [&](int idx){ const QuadNode& nd = quadTree[idx]; if (nd.mass<=0) return; if (nd.child[0]<0 && nd.particleIndex==(int)i) return; double dx=nd.cx-soa_x[i], dy=nd.cy-soa_y[i]; double r2=dx*dx+dy*dy+0.0001; double s=sizeOf(nd); if (nd.child[0]<0 || (s/std::sqrt(r2))<bhTheta){ double invr=1.0/std::sqrt(r2); double f=(gravityG*nd.mass)/r2; ax+=(float)(f*dx*invr); ay+=(float)(f*dy*invr);} else { for (int k=0;k<4;++k) if (nd.child[k]>=0) forceRec(nd.child[k]); } }; forceRec(root); soa_vx[i]+=ax*dt; soa_vy[i]+=ay*dt; }
+            if (!soa_alive[i]) continue; float ax=0.0f, ay=0.0f; std::function<void(int)> forceRec = [&](int idx){ if (idx<0) return; const BVHNode& nd = bvhNodes[idx]; if (nd.mass<=0) return; if (nd.leaf >= 0) { if (nd.leaf == (int)i) return; double dx=nd.cx-soa_x[i], dy=nd.cy-soa_y[i]; double r2=dx*dx+dy*dy+0.0001; double invr=1.0/std::sqrt(r2); double f=(gravityG*nd.mass)/r2; ax+=(float)(f*dx*invr); ay+=(float)(f*dy*invr); return; } double dx=nd.cx-soa_x[i], dy=nd.cy-soa_y[i]; double r2=dx*dx+dy*dy+0.0001; double s=sizeOf(nd); if ((s/std::sqrt(r2))<bhTheta){ double invr=1.0/std::sqrt(r2); double f=(gravityG*nd.mass)/r2; ax+=(float)(f*dx*invr); ay+=(float)(f*dy*invr);} else { forceRec(nd.left); forceRec(nd.right); } }; forceRec(root); soa_vx[i]+=ax*dt; soa_vy[i]+=ay*dt; }
     });
 }
 
@@ -371,6 +397,9 @@ void PhysicsWorld::handleBoundarySoA(float padding) {
 }
 
 void PhysicsWorld::handleCollisionsSoA() {
+    // Grid (colorOfGridCell): partitions simulation space into 4 disjoint color classes so cells of the
+    // same color (and their owned neighbor interactions) can be processed in parallel without touching
+    // the same particles. Each cell owns its within-cell pairs and its right/down/down-right neighbor pairs.
     const float R = partRadius; const float R2 = (2*R)*(2*R);
     const float cellSize = std::max(1.0f, 2.0f * R);
     int gridW = std::max(1, (int)std::ceil((float)w / cellSize)); int gridH = std::max(1, (int)std::ceil((float)h / cellSize));
@@ -388,15 +417,15 @@ void PhysicsWorld::handleCollisionsSoA() {
     std::vector<int> cursor(cells); for (int c=0;c<cells;++c) cursor[(size_t)c] = csrOffsets[(size_t)c];
     for (size_t i=0;i<soa_x.size();++i) { int c = csrPcell[i]; if (c>=0) { int pos = cursor[(size_t)c]++; csrIndex[(size_t)pos] = i; } }
     // 4-color contact resolution
-    auto cellColor = [&](int x,int y){ return ((x&1)<<1) | (y&1); };
+    auto colorOfGridCell = [&](int x,int y){ return ((x&1)<<1) | (y&1); };
     std::vector<double> energyLocal((size_t)numWorkers, 0.0);
     std::vector<std::vector<std::pair<size_t,size_t>>> fragLocal((size_t)numWorkers);
     const int neigh[3][2] = { {1,0}, {0,1}, {1,1} };
     auto within_pair = [&](size_t i, size_t j, int tid){ if (!soa_alive[i]||!soa_alive[j]) return; float dx=soa_x[i]-soa_x[j], dy=soa_y[i]-soa_y[j]; float dist2=dx*dx+dy*dy; if (dist2>R2) return; float dist=std::sqrt(std::max(dist2,1e-6f)); float nx=dx/dist, ny=dy/dist; float overlap=(2*R)-dist; if (overlap>0){ float tm = (float)std::max(1,(int)soa_mass[i]) + (float)std::max(1,(int)soa_mass[j]) + 1e-4f; float pushA = (float)std::max(1,(int)soa_mass[j]) / tm; float pushB = (float)std::max(1,(int)soa_mass[i]) / tm; soa_x[i] += nx*overlap*pushA; soa_y[i] += ny*overlap*pushA; soa_x[j] -= nx*overlap*pushB; soa_y[j] -= ny*overlap*pushB; } float vn1 = soa_vx[i]*nx + soa_vy[i]*ny; float vn2 = soa_vx[j]*nx + soa_vy[j]*ny; float rel=(soa_vx[i]-soa_vx[j])*nx + (soa_vy[i]-soa_vy[j])*ny; const float MOMENTUM_THRESHOLD = 10.0f * 100.0f; float p_rel = std::fabs((float)std::max(1,(int)soa_mass[i]) * vn1 - (float)std::max(1,(int)soa_mass[j]) * vn2); if (p_rel > MOMENTUM_THRESHOLD) fragLocal[(size_t)tid].emplace_back(i,j); if (rel > 0) return; float m1 = std::max(1,(int)soa_mass[i]); float m2 = std::max(1,(int)soa_mass[j]); float ea = std::max(0,(int)soa_elast10[i]) / 10.0f; float eb = std::max(0,(int)soa_elast10[j]) / 10.0f; float e = std::max(0.0f, std::min(1.0f, std::min(ea, eb))); float jimp = -(1 + e) * rel / (1.0f/m1 + 1.0f/m2); float jx = jimp * nx; float jy = jimp * ny; soa_vx[i] += jx / m1; soa_vy[i] += jy / m1; soa_vx[j] -= jx / m2; soa_vy[j] -= jy / m2; double mu = (m1*m2)/(m1+m2); double dE = 0.5 * mu * (1.0 - (double)e * (double)e) * (double)rel * (double)rel; if (dE>0) energyLocal[(size_t)tid] += dE; };
-    for (int pass=0; pass<4; ++pass) {
-        std::vector<int> cellsList; cellsList.reserve((size_t)cells/4+1);
-        for (int y=0;y<gridH;++y) for (int x=0;x<gridW;++x) if (cellColor(x,y)==pass) cellsList.push_back(y*gridW + x);
-        parallelFor(cellsList.size(), [&](size_t b, size_t e, int tid){ for (size_t ui=b; ui<e; ++ui) { int c = cellsList[ui]; int cx = c % gridW; int cy = c / gridW; int a0 = csrOffsets[(size_t)c], a1 = csrOffsets[(size_t)c+1]; for (int a=a0;a<a1;++a) for (int b1=a+1;b1<a1;++b1) within_pair(csrIndex[(size_t)a], csrIndex[(size_t)b1], tid); for (int k=0;k<3;++k){ int nx = cx + neigh[k][0], ny = cy + neigh[k][1]; if (nx<0||nx>=gridW||ny<0||ny>=gridH) continue; int nb = ny*gridW + nx; int b0 = csrOffsets[(size_t)nb], bE = csrOffsets[(size_t)nb+1]; for (int a=a0;a<a1;++a) for (int bb=b0; bb<bE; ++bb) within_pair(csrIndex[(size_t)a], csrIndex[(size_t)bb], tid);} } });
+    for (int colorPass=0; colorPass<4; ++colorPass) {
+        std::vector<int> colorCells; colorCells.reserve((size_t)cells/4+1);
+        for (int y=0;y<gridH;++y) for (int x=0;x<gridW;++x) if (colorOfGridCell(x,y)==colorPass) colorCells.push_back(y*gridW + x);
+        parallelFor(colorCells.size(), [&](size_t b, size_t e, int tid){ for (size_t ui=b; ui<e; ++ui) { int c = colorCells[ui]; int cx = c % gridW; int cy = c / gridW; int a0 = csrOffsets[(size_t)c], a1 = csrOffsets[(size_t)c+1]; for (int a=a0;a<a1;++a) for (int b1=a+1;b1<a1;++b1) within_pair(csrIndex[(size_t)a], csrIndex[(size_t)b1], tid); for (int k=0;k<3;++k){ int nx = cx + neigh[k][0], ny = cy + neigh[k][1]; if (nx<0||nx>=gridW||ny<0||ny>=gridH) continue; int nb = ny*gridW + nx; int b0 = csrOffsets[(size_t)nb], bE = csrOffsets[(size_t)nb+1]; for (int a=a0;a<a1;++a) for (int bb=b0; bb<bE; ++bb) within_pair(csrIndex[(size_t)a], csrIndex[(size_t)bb], tid);} } });
     }
     double eSum = 0.0; for (double v : energyLocal) eSum += v; if (eSum>0) accumulateLostEnergy(eSum);
     for (auto& v : fragLocal) for (auto& p : v) fragSchedule.push_back(p);
@@ -465,120 +494,152 @@ void PhysicsWorld::applyFragmentationsSoAFromSchedule() {
 }
 
 void PhysicsWorld::updateDecaySoA() {
-    // Z -> 2xY with exact mass conservation; defer if no capacity
+    // Parallel detection; centralized apply for capacity and conservation.
+    // Z: 90% → 2x 'Y' (50/50); 10% → 4x 'X' (25% each) with unit velocities up/down/left/right.
     size_t liveCount = 0; for (size_t i=0;i<soa_alive.size();++i) if (soa_alive[i]) ++liveCount;
-    std::vector<size_t> toKill;
-    std::vector<unsigned long long> c_id;
-    std::vector<float> c_x, c_y, c_vx, c_vy;
-    std::vector<uint8_t> c_mass, c_elast, c_decay, c_alive;
-    std::vector<char> c_sym; std::vector<int16_t> c_pix, c_piy;
-    auto pushChild = [&](size_t pi, float offx, float offy, int m, char sym){
-        c_id.push_back(nextId++);
-        c_x.push_back(soa_x[pi] + offx); c_y.push_back(soa_y[pi] + offy);
-        c_vx.push_back(soa_vx[pi]); c_vy.push_back(soa_vy[pi]);
-        c_mass.push_back((uint8_t)std::max(1, std::min(100, m)));
-        c_elast.push_back(soa_elast10[pi]); c_decay.push_back(0); c_alive.push_back(1);
-        c_sym.push_back(sym); c_pix.push_back(-1); c_piy.push_back(-1);
-    };
-    for (size_t i=0;i<soa_alive.size();++i) {
-        if (!soa_alive[i]) continue;
-        soa_decay[i] = (uint8_t)(soa_decay[i] + 1);
-        if (soa_decay[i] < 10) continue;
-        soa_decay[i] = 0;
-        if (soa_sym[i] == 'Z') {
-            if (soa_mass[i] < 2) { soa_sym[i] = 'Y'; continue; }
-            if (liveCount + 1 > MaxParticles) continue;
-            // remove parent and add two Y children
-            toKill.push_back(i); --liveCount;
-            char sym='Y';
-            int m1 = soa_mass[i]/2; int m2 = (int)soa_mass[i] - m1;
-            // random opposite directions for slight separation
-            std::uniform_real_distribution<float> ang(0.0f, (float)M_PI * 2.0f);
-            float theta = ang(prng); float ux = std::cos(theta); float uy = std::sin(theta);
-            float sep = std::max(0.1f, partRadius * 0.6f);
-            pushChild(i, ux*sep, uy*sep, m1, sym); ++liveCount;
-            pushChild(i,-ux*sep,-uy*sep, m2, sym); ++liveCount;
+    struct ChildDec { size_t pi; float offx, offy; float vx, vy; int m; char sym; };
+    std::vector<std::vector<size_t>> toKillLocal((size_t)numWorkers);
+    std::vector<std::vector<ChildDec>> childrenLocal((size_t)numWorkers);
+    parallelFor(soa_alive.size(), [&](size_t b, size_t e, int tid){
+        auto& kill = toKillLocal[(size_t)tid]; auto& ch = childrenLocal[(size_t)tid];
+        std::uniform_real_distribution<float> ang(0.0f, (float)M_PI*2.0f);
+        std::uniform_int_distribution<int> coin10(0,9);
+        for (size_t i=b;i<e;++i) {
+            if (!soa_alive[i]) continue;
+            uint8_t d = (uint8_t)(soa_decay[i] + 1); soa_decay[i] = d; if (d < 10) continue; soa_decay[i] = 0;
+            if (soa_sym[i] != 'Z') continue;
+            int massZ = (int)soa_mass[i];
+            if (massZ < 2) { soa_sym[i] = 'Y'; continue; }
+            bool fourWay = (coin10(prng) == 0) && (massZ >= 4);
+            float sep = std::max(0.1f, partRadius*0.6f);
+            kill.push_back(i);
+            if (fourWay) {
+                int q = massZ / 4; int r = massZ - 3*q; int mA=q, mB=q, mC=q, mD=q; if (r>0){mA++;r--; } if (r>0){mB++;r--; } if (r>0){mC++;r--; }
+                ch.push_back({i, 0.0f, -sep, 0.0f, -1.0f, mA, 'X'});
+                ch.push_back({i, 0.0f,  sep, 0.0f,  1.0f, mB, 'X'});
+                ch.push_back({i, -sep, 0.0f, -1.0f, 0.0f, mC, 'X'});
+                ch.push_back({i,  sep, 0.0f,  1.0f, 0.0f, mD, 'X'});
+            } else {
+                int m1 = massZ / 2; int m2 = massZ - m1;
+                float theta = ang(prng); float ux = std::cos(theta), uy = std::sin(theta);
+                ch.push_back({i, ux*sep,  uy*sep,  soa_vx[i], soa_vy[i], m1, 'Y'});
+                ch.push_back({i,-ux*sep, -uy*sep, soa_vx[i], soa_vy[i], m2, 'Y'});
+            }
         }
-    }
-    if (!toKill.empty() || !c_id.empty()) {
-        for (size_t idx : toKill) soa_alive[idx] = 0;
-        soaCompact();
-        size_t addN = c_id.size(); size_t base = soa_id.size();
-        soa_id.resize(base+addN); soa_x.resize(base+addN); soa_y.resize(base+addN);
-        soa_vx.resize(base+addN); soa_vy.resize(base+addN); soa_mass.resize(base+addN);
-        soa_elast10.resize(base+addN); soa_decay.resize(base+addN); soa_alive.resize(base+addN);
-        soa_sym.resize(base+addN); soa_pix.resize(base+addN); soa_piy.resize(base+addN);
-        for (size_t k=0;k<addN;++k) {
-            soa_id[base+k]=c_id[k]; soa_x[base+k]=c_x[k]; soa_y[base+k]=c_y[k];
-            soa_vx[base+k]=c_vx[k]; soa_vy[base+k]=c_vy[k]; soa_mass[base+k]=c_mass[k];
-            soa_elast10[base+k]=c_elast[k]; soa_decay[base+k]=c_decay[k]; soa_alive[base+k]=c_alive[k];
-            soa_sym[base+k]=c_sym[k]; soa_pix[base+k]=c_pix[k]; soa_piy[base+k]=c_piy[k];
+    });
+    std::vector<size_t> toKill; for (auto& v : toKillLocal) for (auto x : v) toKill.push_back(x);
+    std::vector<ChildDec> kids; for (auto& v : childrenLocal) { kids.insert(kids.end(), v.begin(), v.end()); }
+    if (!toKill.empty() || !kids.empty()) {
+        size_t allowNew = (MaxParticles > liveCount) ? (MaxParticles - liveCount) : 0;
+        std::unordered_map<size_t, std::vector<ChildDec>> byParent; byParent.reserve(toKill.size()*2);
+        for (auto& c : kids) byParent[c.pi].push_back(c);
+        std::vector<size_t> acceptedKills; acceptedKills.reserve(toKill.size());
+        std::vector<ChildDec> acceptedKids; acceptedKids.reserve(kids.size());
+        for (size_t pi : toKill) {
+            auto it = byParent.find(pi); if (it == byParent.end()) continue;
+            size_t childCount = it->second.size(); size_t need = (childCount >= 1) ? (childCount - 1) : 0;
+            if (allowNew >= need) {
+                allowNew -= need; acceptedKills.push_back(pi);
+                auto& vec = it->second; acceptedKids.insert(acceptedKids.end(), vec.begin(), vec.end());
+            }
         }
+        for (size_t idx : acceptedKills) soa_alive[idx] = 0;
+        soaCompact(); size_t base = soa_id.size(); size_t addN = acceptedKids.size();
+        soa_id.resize(base+addN); soa_x.resize(base+addN); soa_y.resize(base+addN); soa_vx.resize(base+addN); soa_vy.resize(base+addN); soa_mass.resize(base+addN); soa_elast10.resize(base+addN); soa_decay.resize(base+addN); soa_alive.resize(base+addN); soa_sym.resize(base+addN); soa_pix.resize(base+addN); soa_piy.resize(base+addN);
+        for (size_t k=0;k<acceptedKids.size();++k) { auto& c = acceptedKids[k]; size_t dst = base+k; soa_id[dst]=nextId++; soa_x[dst]=soa_x[c.pi]+c.offx; soa_y[dst]=soa_y[c.pi]+c.offy; soa_vx[dst]=c.vx; soa_vy[dst]=c.vy; soa_mass[dst]=(uint8_t)std::max(1,std::min(100,c.m)); soa_elast10[dst]=soa_elast10[c.pi]; soa_decay[dst]=0; soa_alive[dst]=1; soa_sym[dst]=c.sym; soa_pix[dst]=-1; soa_piy[dst]=-1; }
     }
 }
 
 void PhysicsWorld::updateAdjacencyAndCombineSoA() {
-    // Build cell map for adjacent pairs
-    std::unordered_map<long long, std::vector<size_t>> cellMap;
-    cellMap.reserve(soa_x.size()*2);
-    auto keyOf = [](int x, int y) -> long long { return (static_cast<long long>(x) << 32) ^ (unsigned long long)y; };
-    std::vector<std::pair<int,int>> cellOf(soa_x.size());
-    for (size_t i=0;i<soa_x.size();++i) {
-        if (!soa_alive[i]) { cellOf[i]={-1,-1}; continue; }
-        int ix = clampi((int)std::round(soa_x[i]), 0, w - 1);
-        int iy = clampi((int)std::round(soa_y[i]), 0, h - 1);
-        cellOf[i]={ix,iy}; cellMap[keyOf(ix,iy)].push_back(i);
-    }
-    std::unordered_set<unsigned long long> present;
+    // Owner cells: each candidate pair is assigned to an owner screen cell to avoid duplicate work and data races.
+    // We use the cell of the particle with the smaller (row-major) cell id as the owner. Owner cells are further
+    // partitioned into 4 color classes (colorOfOwnerCell(ix,iy)) to process non-neighboring cells in parallel.
+    // Use CSR grid for adjacency detection in parallel
+    int gridW = w, gridH = h; int cells = gridW*gridH;
+    auto cellIndex = [&](int ix, int iy)->int { ix = clampi(ix,0,w-1); iy = clampi(iy,0,h-1); return iy*gridW + ix; };
+    csrPcell.resize(soa_x.size());
+    parallelFor(soa_x.size(), [&](size_t b, size_t e, int){ for (size_t i=b;i<e;++i) { if (!soa_alive[i]) { csrPcell[i]=-1; continue; } int ix=(int)std::round(soa_x[i]); int iy=(int)std::round(soa_y[i]); csrPcell[i] = cellIndex(ix,iy); } });
+    csrCounts.assign(cells,0);
+    std::vector<std::vector<int>> local((size_t)numWorkers); for (int t=0;t<numWorkers;++t) local[(size_t)t].assign(cells,0);
+    parallelFor(soa_x.size(), [&](size_t b, size_t e, int tid){ auto& lc=local[(size_t)tid]; for (size_t i=b;i<e;++i){ int c=csrPcell[i]; if (c>=0) lc[(size_t)c]++; } });
+    for (int t=0;t<numWorkers;++t) for (int c=0;c<cells;++c) csrCounts[(size_t)c] += local[(size_t)t][(size_t)c];
+    csrOffsets.resize(cells+1); csrOffsets[0]=0; for (int c=0;c<cells;++c) csrOffsets[(size_t)c+1]=csrOffsets[(size_t)c]+csrCounts[(size_t)c]; csrIndex.resize((size_t)csrOffsets[(size_t)cells]);
+    std::vector<int> cursor(cells); for (int c=0;c<cells;++c) cursor[(size_t)c]=csrOffsets[(size_t)c]; for (size_t i=0;i<soa_x.size();++i){ int c=csrPcell[i]; if (c>=0){ int pos=cursor[(size_t)c]++; csrIndex[(size_t)pos]=i; } }
+    // parallel gather present keys
     auto pkhash = [&](unsigned long long a, unsigned long long b){ unsigned long long x = (a<<1) ^ (b + 0x9e3779b97f4a7c15ULL + (a<<6) + (a>>2)); return x; };
     auto mkpair = [&](unsigned long long a, unsigned long long b){ return a<b ? std::make_pair(a,b) : std::make_pair(b,a); };
-    std::vector<PairKey> presentKeys;
-    for (size_t i=0;i<soa_x.size();++i) {
-        if (!soa_alive[i]) continue;
-        auto [xi, yi] = cellOf[i];
-        for (int dy=-1; dy<=1; ++dy) {
-            for (int dx=-1; dx<=1; ++dx) {
-                if (dx==0 && dy==0) continue; int nx = xi+dx, ny = yi+dy; auto it = cellMap.find(keyOf(nx,ny)); if (it==cellMap.end()) continue;
-                for (size_t j : it->second) { if (j<=i) continue; auto pr = mkpair(soa_id[i], soa_id[j]); unsigned long long h = pkhash(pr.first, pr.second); if (present.insert(h).second) presentKeys.push_back({pr.first, pr.second}); }
-            }
+    std::vector<std::vector<PairKey>> presentLocal((size_t)numWorkers);
+    parallelFor(cells, [&](size_t b, size_t e, int tid){ auto& out = presentLocal[(size_t)tid]; out.reserve(256); for (size_t ci=b; ci<e; ++ci){ int a0=csrOffsets[ci], a1=csrOffsets[ci+1]; // within
+            for (int a=a0;a<a1;++a) for (int b1=a+1;b1<a1;++b1){ size_t i=csrIndex[(size_t)a], j=csrIndex[(size_t)b1]; auto pr=mkpair(soa_id[i], soa_id[j]); out.push_back({pr.first, pr.second}); }
+            int cx = (int)(ci % gridW), cy = (int)(ci / gridW);
+            for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx){ if (dx==0 && dy==0) continue; int nx=cx+dx, ny=cy+dy; if (nx<0||nx>=gridW||ny<0||ny>=gridH) continue; int nb = ny*gridW + nx; int b0=csrOffsets[(size_t)nb], bE=csrOffsets[(size_t)nb+1]; for (int a=a0;a<a1;++a) for (int bb=b0; bb<bE; ++bb){ size_t i=csrIndex[(size_t)a], j=csrIndex[(size_t)bb]; if (i>=j) continue; auto pr=mkpair(soa_id[i], soa_id[j]); out.push_back({pr.first, pr.second}); } }
         }
-    }
+    });
+    // merge: filter duplicates with a set for this frame
+    std::unordered_set<unsigned long long> present;
+    present.reserve(soa_id.size()*4+64);
+    std::vector<PairKey> presentKeys;
+    for (auto& vec : presentLocal) for (auto& k : vec) { unsigned long long h = pkhash(k.a, k.b); if (present.insert(h).second) presentKeys.push_back(k); }
     // Increment counts; prune stale
     std::unordered_set<unsigned long long> keep;
     for (auto& k : presentKeys) { adjacencyCounts.increment(k); unsigned long long hh=pkhash(k.a,k.b); keep.insert(hh); }
     std::vector<PairKey> toErase;
-    adjacencyCounts.forEach([&](const PairKey& pk, int& v){ unsigned long long hh = pkhash(pk.a, pk.b); if (!keep.count(hh)) toErase.push_back(pk); });
+    adjacencyCounts.forEach([&](const PairKey& pk, int){ unsigned long long hh = pkhash(pk.a, pk.b); if (!keep.count(hh)) toErase.push_back(pk); });
     for (auto& k : toErase) adjacencyCounts.erase(k);
     // Attempt combinations
-    std::unordered_set<unsigned long long> consumed;
-    std::vector<size_t> killIdx; killIdx.reserve(32);
-    std::vector<unsigned long long> c_id; std::vector<float> c_x, c_y, c_vx, c_vy; std::vector<uint8_t> c_mass, c_elast, c_decay, c_alive; std::vector<char> c_sym; std::vector<int16_t> c_pix, c_piy;
-    std::uniform_int_distribution<int> coin(0,1);
-    std::vector<PairKey> keys; keys.reserve(adjacencyCounts.size()); adjacencyCounts.forEach([&](const PairKey& pk, int& v){ keys.push_back(pk); });
-    for (auto& K : keys) {
+    // Build id->index map for quick lookups
+    std::unordered_map<unsigned long long, size_t> id2idx; id2idx.reserve(soa_id.size()*2);
+    for (size_t i=0;i<soa_id.size();++i) if (soa_alive[i]) id2idx[soa_id[i]] = i;
+    // Partition keys by owner cell (cell of smaller id's index); then process per color in parallel
+    auto cellOfIdx = [&](size_t i){ int ix = clampi((int)std::round(soa_x[i]), 0, w - 1); int iy = clampi((int)std::round(soa_y[i]), 0, h - 1); return iy*w + ix; };
+    std::unordered_map<int, std::vector<PairKey>> byCell; byCell.reserve(presentKeys.size());
+    for (auto& K : presentKeys) {
         int cnt=0; if (!adjacencyCounts.get(K, cnt)) continue; if (cnt < 10) continue;
-        if (consumed.count(K.a) || consumed.count(K.b)) { adjacencyCounts.erase(K); continue; }
-        if (coin(prng) == 0) { adjacencyCounts.set(K, 0); continue; }
-        // find indices by id (linear scan)
-        size_t ia = SIZE_MAX, ib = SIZE_MAX; for (size_t i=0;i<soa_id.size();++i){ if (!soa_alive[i]) continue; if (soa_id[i]==K.a) ia=i; else if (soa_id[i]==K.b) ib=i; }
-        if (ia==SIZE_MAX || ib==SIZE_MAX) { adjacencyCounts.erase(K); continue; }
-        // combine
-        int iaL = (soa_sym[ia]-'A'+1); int ibL = (soa_sym[ib]-'A'+1); int sumL = iaL + ibL; if (sumL > 26) sumL = 26; char sym=(char)('A'+(sumL-1));
-        int rawMassSum = (int)soa_mass[ia] + (int)soa_mass[ib]; int massSum = rawMassSum; if (massSum > 100) { accumulateLostMass((double)(massSum-100)); massSum = 100; }
-        float m1 = std::max(1,(int)soa_mass[ia]); float m2 = std::max(1,(int)soa_mass[ib]); float vx = (m1*soa_vx[ia] + m2*soa_vx[ib])/(m1+m2); float vy = (m1*soa_vy[ia] + m2*soa_vy[ib])/(m1+m2);
-        // place at first's position (smaller id)
-        size_t first = (soa_id[ia] < soa_id[ib]) ? ia : ib;
-        killIdx.push_back(ia); killIdx.push_back(ib); consumed.insert(K.a); consumed.insert(K.b); adjacencyCounts.erase(K);
-        c_id.push_back(nextId++); c_x.push_back(soa_x[first]); c_y.push_back(soa_y[first]); c_vx.push_back(vx); c_vy.push_back(vy); c_mass.push_back((uint8_t)massSum); c_elast.push_back((uint8_t)((soa_elast10[ia]+soa_elast10[ib])/2)); c_decay.push_back(0); c_alive.push_back(1); c_sym.push_back(sym); c_pix.push_back(-1); c_piy.push_back(-1);
+        auto ita = id2idx.find(K.a); auto itb = id2idx.find(K.b); if (ita==id2idx.end()||itb==id2idx.end()) continue;
+        size_t ia = ita->second, ib = itb->second; int ca = cellOfIdx(ia), cb = cellOfIdx(ib); int owner = (ca < cb) ? ca : cb; byCell[owner].push_back(K);
     }
-    if (!killIdx.empty() || !c_id.empty()) {
-        for (size_t idx : killIdx) soa_alive[idx] = 0;
-        soaCompact(); size_t addN = c_id.size(); size_t base = soa_id.size();
-        soa_id.resize(base+addN); soa_x.resize(base+addN); soa_y.resize(base+addN);
-        soa_vx.resize(base+addN); soa_vy.resize(base+addN); soa_mass.resize(base+addN); soa_elast10.resize(base+addN); soa_decay.resize(base+addN); soa_alive.resize(base+addN);
-        soa_sym.resize(base+addN); soa_pix.resize(base+addN); soa_piy.resize(base+addN);
-        for (size_t k=0;k<addN;++k) { soa_id[base+k]=c_id[k]; soa_x[base+k]=c_x[k]; soa_y[base+k]=c_y[k]; soa_vx[base+k]=c_vx[k]; soa_vy[base+k]=c_vy[k]; soa_mass[base+k]=c_mass[k]; soa_elast10[base+k]=c_elast[k]; soa_decay[base+k]=c_decay[k]; soa_alive[base+k]=c_alive[k]; soa_sym[base+k]=c_sym[k]; soa_pix[base+k]=c_pix[k]; soa_piy[base+k]=c_piy[k]; }
+    auto colorOfCell = [&](int cid){ int ix = cid % w; int iy = cid / w; return ((ix&1)<<1) | (iy&1); };
+    struct Child { size_t firstIdx; float vx, vy; int mass; char sym; };
+    std::uniform_int_distribution<int> coin(0,1);
+    for (int pass=0; pass<4; ++pass) {
+        std::vector<int> cellsList; cellsList.reserve(byCell.size());
+        for (auto& kv : byCell) if (colorOfCell(kv.first) == pass) cellsList.push_back(kv.first);
+        // Per-thread results
+        std::vector<std::vector<size_t>> killLocal((size_t)numWorkers);
+        std::vector<std::vector<Child>> childLocal((size_t)numWorkers);
+        std::vector<std::vector<PairKey>> eraseLocal((size_t)numWorkers), resetLocal((size_t)numWorkers);
+        parallelFor(cellsList.size(), [&](size_t b, size_t e, int tid){ auto& kill = killLocal[(size_t)tid]; auto& kids = childLocal[(size_t)tid]; auto& er = eraseLocal[(size_t)tid]; auto& rs = resetLocal[(size_t)tid]; std::unordered_set<size_t> consumed; for (size_t ui=b; ui<e; ++ui) { int cell = cellsList[ui]; auto& vec = byCell[cell]; for (auto& K : vec) {
+                    int cnt=0; if (!adjacencyCounts.get(K, cnt)) continue; if (cnt < 10) continue;
+                    auto ita = id2idx.find(K.a); auto itb = id2idx.find(K.b); if (ita==id2idx.end()||itb==id2idx.end()) { er.push_back(K); continue; }
+                    size_t ia = ita->second, ib = itb->second; if (!soa_alive[ia]||!soa_alive[ib]) { er.push_back(K); continue; }
+                    if (consumed.count(ia) || consumed.count(ib)) { rs.push_back(K); continue; }
+                    if (coin(prng) == 0) { rs.push_back(K); continue; }
+                    int iaL = (soa_sym[ia]-'A'+1); int ibL = (soa_sym[ib]-'A'+1); int sumL = iaL + ibL; if (sumL > 26) sumL = 26; char sym=(char)('A'+(sumL-1));
+                    int rawMassSum = (int)soa_mass[ia] + (int)soa_mass[ib]; int massSum = rawMassSum; if (massSum > 100) { // record mass loss; applied centrally
+                        massSum = 100; }
+                    float m1 = std::max(1,(int)soa_mass[ia]); float m2 = std::max(1,(int)soa_mass[ib]); float vx = (m1*soa_vx[ia] + m2*soa_vx[ib])/(m1+m2); float vy = (m1*soa_vy[ia] + m2*soa_vy[ib])/(m1+m2);
+                    size_t first = (soa_id[ia] < soa_id[ib]) ? ia : ib;
+                    kill.push_back(ia); kill.push_back(ib); kids.push_back({first, vx, vy, massSum, sym}); er.push_back(K); consumed.insert(ia); consumed.insert(ib);
+                } }
+        });
+        // Merge results and apply centrally
+        std::vector<size_t> killIdx; for (auto& v : killLocal) for (auto x : v) killIdx.push_back(x);
+        std::vector<Child> children; for (auto& v : childLocal) { children.insert(children.end(), v.begin(), v.end()); }
+        std::vector<PairKey> toErase; for (auto& v : eraseLocal) for (auto& k : v) toErase.push_back(k);
+        std::vector<PairKey> toReset; for (auto& v : resetLocal) for (auto& k : v) toReset.push_back(k);
+        if (!killIdx.empty() || !children.empty()) {
+            // Mark kills in parallel (no compaction yet to keep indices stable until all colors processed)
+            parallelFor(killIdx.size(), [&](size_t b, size_t e, int){ for (size_t i=b;i<e;++i) { size_t idx = killIdx[i]; if (idx < soa_alive.size()) soa_alive[idx] = 0; } });
+            // Append children in parallel
+            size_t base = soa_id.size(); size_t addN = children.size();
+            soa_id.resize(base+addN); soa_x.resize(base+addN); soa_y.resize(base+addN); soa_vx.resize(base+addN); soa_vy.resize(base+addN); soa_mass.resize(base+addN); soa_elast10.resize(base+addN); soa_decay.resize(base+addN); soa_alive.resize(base+addN); soa_sym.resize(base+addN); soa_pix.resize(base+addN); soa_piy.resize(base+addN);
+            parallelFor(addN, [&](size_t b, size_t e, int){ for (size_t k=b;k<e;++k) { auto& c = children[k]; size_t dst = base + k; soa_id[dst]=nextId++; soa_x[dst]=soa_x[c.firstIdx]; soa_y[dst]=soa_y[c.firstIdx]; soa_vx[dst]=c.vx; soa_vy[dst]=c.vy; soa_mass[dst]=(uint8_t)c.mass; soa_elast10[dst]=8; soa_decay[dst]=0; soa_alive[dst]=1; soa_sym[dst]=c.sym; soa_pix[dst]=-1; soa_piy[dst]=-1; } });
+        }
+        for (auto& k : toErase) adjacencyCounts.erase(k);
+        for (auto& k : toReset) adjacencyCounts.set(k, 0);
     }
+    // Final compaction after processing all color batches
+    soaCompact();
 }
 
 void PhysicsWorld::maybeSpawnFromPoolsSoA() {
@@ -960,7 +1021,7 @@ void PhysicsWorld::updateAdjacencyAndCombine() {
     }
     // Collect stale and erase
     std::vector<PairKey> toErase;
-    adjacencyCounts.forEach([&](const PairKey& pk, int& v){ unsigned long long hh = pkhash(pk.a, pk.b); if (!keep.count(hh)) toErase.push_back(pk); });
+    adjacencyCounts.forEach([&](const PairKey& pk, int){ unsigned long long hh = pkhash(pk.a, pk.b); if (!keep.count(hh)) toErase.push_back(pk); });
     for (auto& k : toErase) adjacencyCounts.erase(k);
 
     // Attempt combinations where count >= 10
@@ -971,7 +1032,7 @@ void PhysicsWorld::updateAdjacencyAndCombine() {
     // Snapshot keys for iteration to avoid iterator invalidation
     std::vector<PairKey> keys;
     keys.reserve(adjacencyCounts.size());
-    adjacencyCounts.forEach([&](const PairKey& pk, int& v){ keys.push_back(pk); });
+    adjacencyCounts.forEach([&](const PairKey& pk, int){ keys.push_back(pk); });
     for (auto& K : keys) {
         int cnt=0; if (!adjacencyCounts.get(K, cnt)) continue;
         if (cnt >= 10) {

@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
 
     bool done = false;
     using namespace std::chrono;
-    auto lastStep = steady_clock::now();
+    // snapshot-driven rendering; no physics stepping in UI thread
     // Snapshot-driven rendering state
     uint64_t lastSeq = 0;
     std::unordered_set<long long> prevOcc;
