@@ -25,8 +25,14 @@ No background thread: the main loop steps the world based on elapsed time.
 
 - Integration: 
   - simple Euler update per step (`x += vx*dt`, `y += vy*dt`).
-- Boundary: 
-  - bounce with coefficient of restitution `restitution`.
+- Boundary:
+  - Elastic: particles bounce with coefficient of restitution `restitution`.
+  - Inelastic wall splits: if a particle is sufficiently inelastic (elasticity ≤ 0.4) and hits a wall, it splits into
+    2–4 children (next lower symbol) when capacity allows. Mass is divided equally (integer 50/50/25% shares with any
+    remainder distributed by +1), and each child receives an equal share of the parent’s kinetic energy. Children are
+    emitted in distinct directions consistent with the wall normal/tangent (away from the wall and spread along the
+    tangent); at corners, children are emitted into different outward quadrants. If capacity is insufficient to
+    instantiate all children (net +N−1 slots), the parent falls back to an inelastic bounce.
 - Collisions (pairwise check):
   - Contact detected when centers within `2*radius`.
   - Resolve overlap by pushing apart based on relative masses.

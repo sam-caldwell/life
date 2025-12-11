@@ -380,20 +380,91 @@ void PhysicsWorld::updateParticleSoA(float dts) {
 
 void PhysicsWorld::handleBoundarySoA(float padding) {
     float minx = 0.0f + padding, miny = 0.0f + padding; float maxx = (float)(w - 1) - padding; float maxy = (float)(h - 1) - padding;
-    // Thread-local energy accumulation to avoid data races
+    // Thread-local energy accumulation and boundary split candidates
+    struct WallSplitCand { size_t i; bool hitX; bool hitY; float vxOld; float vyOld; };
     std::vector<double> energyLocal((size_t)numWorkers, 0.0);
+    std::vector<std::vector<WallSplitCand>> splitLocal((size_t)numWorkers);
     parallelFor(soa_x.size(), [&](size_t b, size_t e, int tid){
         double eacc = 0.0;
+        auto& sl = splitLocal[(size_t)tid];
         for (size_t i=b;i<e;++i) {
             if (!soa_alive[i]) continue;
-            if (soa_x[i] < minx) { float vxb=soa_vx[i]; soa_x[i]=minx; soa_vx[i]=-soa_vx[i]*bounceRestitution; double dE=0.5*std::max(1,(int)soa_mass[i])*(vxb*vxb - soa_vx[i]*soa_vx[i]); if (dE>0) eacc += dE; }
-            if (soa_x[i] > maxx) { float vxb=soa_vx[i]; soa_x[i]=maxx; soa_vx[i]=-soa_vx[i]*bounceRestitution; double dE=0.5*std::max(1,(int)soa_mass[i])*(vxb*vxb - soa_vx[i]*soa_vx[i]); if (dE>0) eacc += dE; }
-            if (soa_y[i] < miny) { float vyb=soa_vy[i]; soa_y[i]=miny; soa_vy[i]=-soa_vy[i]*bounceRestitution; double dE=0.5*std::max(1,(int)soa_mass[i])*(vyb*vyb - soa_vy[i]*soa_vy[i]); if (dE>0) eacc += dE; }
-            if (soa_y[i] > maxy) { float vyb=soa_vy[i]; soa_y[i]=maxy; soa_vy[i]=-soa_vy[i]*bounceRestitution; double dE=0.5*std::max(1,(int)soa_mass[i])*(vyb*vyb - soa_vy[i]*soa_vy[i]); if (dE>0) eacc += dE; }
+            bool hitX=false, hitY=false;
+            float vx0 = soa_vx[i], vy0 = soa_vy[i];
+            // Clamp into bounds and detect boundary collisions
+            if (soa_x[i] < minx) { soa_x[i]=minx; hitX=true; }
+            if (soa_x[i] > maxx) { soa_x[i]=maxx; hitX=true; }
+            if (soa_y[i] < miny) { soa_y[i]=miny; hitY=true; }
+            if (soa_y[i] > maxy) { soa_y[i]=maxy; hitY=true; }
+            if (hitX || hitY) {
+                // Inelastic if particle elasticity <= 4; then schedule split, else perform bounce
+                if ((int)soa_elast10[i] <= 4) {
+                    sl.push_back({i, hitX, hitY, vx0, vy0});
+                    // Do not bounce now; parent may be removed in apply
+                } else {
+                    if (hitX) { float vxb=vx0; soa_vx[i] = -vx0 * bounceRestitution; double dE=0.5*std::max(1,(int)soa_mass[i])*(vxb*vxb - soa_vx[i]*soa_vx[i]); if (dE>0) eacc += dE; }
+                    if (hitY) { float vyb=vy0; soa_vy[i] = -vy0 * bounceRestitution; double dE=0.5*std::max(1,(int)soa_mass[i])*(vyb*vyb - soa_vy[i]*soa_vy[i]); if (dE>0) eacc += dE; }
+                }
+            }
         }
         energyLocal[(size_t)tid] += eacc;
     });
     double eSum = 0.0; for (double v : energyLocal) eSum += v; if (eSum > 0) accumulateLostEnergy(eSum);
+    // Merge split candidates and apply capacity-aware spawning
+    std::vector<WallSplitCand> cands; for (auto& v : splitLocal) for (auto& c : v) cands.push_back(c);
+    if (!cands.empty()) {
+        size_t liveCount = 0; for (size_t i=0;i<soa_alive.size();++i) if (soa_alive[i]) ++liveCount;
+        size_t allowNew = (MaxParticles > liveCount) ? (MaxParticles - liveCount) : 0;
+        std::vector<size_t> kill; kill.reserve(cands.size());
+        struct ChildB { size_t pi; float offx, offy; float vx, vy; int m; char sym; };
+        std::vector<ChildB> children; children.reserve(cands.size()*3);
+        std::uniform_int_distribution<int> kdist(2,4);
+        for (auto& cd : cands) {
+            size_t i = cd.i; if (!soa_alive[i]) continue; int m = std::max(1,(int)soa_mass[i]); if (m < 2) continue; int N = std::min(kdist(prng), m); size_t need = (size_t)(N - 1); if (allowNew < need) {
+                // fallback: bounce now using stored old velocities
+                if (cd.hitX) { float vxb=cd.vxOld; float newvx = -cd.vxOld * bounceRestitution; double dE=0.5*m*(vxb*vxb - newvx*newvx); if (dE>0) accumulateLostEnergy(dE); soa_vx[i]=newvx; }
+                if (cd.hitY) { float vyb=cd.vyOld; float newvy = -cd.vyOld * bounceRestitution; double dE=0.5*m*(vyb*vyb - newvy*newvy); if (dE>0) accumulateLostEnergy(dE); soa_vy[i]=newvy; }
+                continue;
+            }
+            allowNew -= need; kill.push_back(i);
+            // equal mass shares
+            int base = m / N; int rem = m - base * N; std::vector<int> masses; masses.resize(N, base); for (int t=0;t<rem;++t) masses[(size_t)t]++;
+            // total kinetic energy
+            double E = 0.5 * m * (cd.vxOld*cd.vxOld + cd.vyOld*cd.vyOld);
+            double Echild = (N>0) ? (E / (double)N) : 0.0;
+            float sep = std::max(0.1f, partRadius*0.6f);
+            // Directions set away from wall normal
+            std::vector<std::pair<float,float>> dirs; dirs.reserve(N);
+            auto pushDir = [&](float ux, float uy){ float len = std::sqrt(ux*ux+uy*uy); if (len<1e-6f) len=1.0f; dirs.emplace_back(ux/len, uy/len); };
+            if (cd.hitX && !cd.hitY) {
+                // away X normal depending on wall side
+                float sx = (soa_x[i] <= minx+1e-6f) ? 1.0f : -1.0f;
+                pushDir(sx, 0); if (N>=3) { pushDir(sx, 1); pushDir(sx,-1); } if (N==2||N==4) { pushDir(0,1); if (N==4) pushDir(0,-1); }
+            } else if (cd.hitY && !cd.hitX) {
+                float sy = (soa_y[i] <= miny+1e-6f) ? 1.0f : -1.0f;
+                pushDir(0, sy); if (N>=3) { pushDir(1, sy); pushDir(-1, sy); } if (N==2||N==4) { pushDir(1,0); if (N==4) pushDir(-1,0); }
+            } else {
+                // corner: away from both
+                float sx = (soa_x[i] <= minx+1e-6f) ? 1.0f : -1.0f; float sy = (soa_y[i] <= miny+1e-6f) ? 1.0f : -1.0f;
+                pushDir(sx, sy); if (N>=2) pushDir(sx,-sy); if (N>=3) pushDir(-sx, sy); if (N>=4) pushDir(-sx,-sy);
+            }
+            // ensure N directions
+            while ((int)dirs.size() < N) dirs.emplace_back(1.0f,0.0f);
+            // Create children
+            char sym = (soa_sym[i]>'A') ? (char)(soa_sym[i]-1) : 'A';
+            for (int k=0;k<N;++k) {
+                int cm = masses[(size_t)k]; double sp = (cm>0 && Echild>0) ? std::sqrt(std::max(0.0, 2.0*Echild/(double)cm)) : 0.0; auto [ux,uy] = dirs[(size_t)k];
+                children.push_back({i, ux*sep, uy*sep, (float)(ux*sp), (float)(uy*sp), cm, sym});
+            }
+        }
+        // Apply: kill and append children
+        for (size_t idx : kill) soa_alive[idx] = 0;
+        if (!kill.empty() || !children.empty()) {
+            soaCompact(); size_t base = soa_id.size(); size_t addN = children.size();
+            soa_id.resize(base+addN); soa_x.resize(base+addN); soa_y.resize(base+addN); soa_vx.resize(base+addN); soa_vy.resize(base+addN); soa_mass.resize(base+addN); soa_elast10.resize(base+addN); soa_decay.resize(base+addN); soa_alive.resize(base+addN); soa_sym.resize(base+addN); soa_pix.resize(base+addN); soa_piy.resize(base+addN);
+            for (size_t k=0;k<children.size();++k) { auto& c = children[k]; size_t dst = base+k; soa_id[dst]=nextId++; soa_x[dst]=soa_x[c.pi]+c.offx; soa_y[dst]=soa_y[c.pi]+c.offy; soa_vx[dst]=c.vx; soa_vy[dst]=c.vy; soa_mass[dst]=(uint8_t)std::max(1,std::min(100,c.m)); soa_elast10[dst]=soa_elast10[c.pi]; soa_decay[dst]=0; soa_alive[dst]=1; soa_sym[dst]=c.sym; soa_pix[dst]=-1; soa_piy[dst]=-1; }
+        }
+    }
 }
 
 void PhysicsWorld::handleCollisionsSoA() {

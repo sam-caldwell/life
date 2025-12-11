@@ -19,7 +19,9 @@
 
 /**
  * @class PhysicsWorld
- * @brief Manages a set of particles with mass, velocity, gravity, collisions, and boundary bounces.
+ * @brief Manages a set of particles with mass, velocity, gravity, collisions, and boundary interactions
+ *        (elastic bounces; inelastic wall collisions may split a particle into 2–4 lower‑symbol children
+ *        with equal mass/energy shares when capacity allows).
  */
 class PhysicsWorld {
 public:
@@ -209,7 +211,7 @@ private:
     // Constants
     float gravityG;               // gravitational constant
     float partRadius;             // particle radius (uniform)
-    float bounceRestitution;      // near-elastic boundary bounces
+    float bounceRestitution;      // boundary coefficient of restitution for elastic bounces
     static constexpr size_t MaxParticles = 300; // hard cap per requirements
     // Recycling pools: accumulated losses due to constraints (mass) and dissipation (energy)
     double massPool{0.0};
