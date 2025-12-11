@@ -83,6 +83,9 @@ static void init_colors_physics() {
     init_pair(14, COLOR_MAGENTA, -1);
     init_pair(15, COLOR_CYAN, -1);
     init_pair(16, COLOR_WHITE, -1);
+    // Background highlight pairs
+    init_pair(17, COLOR_WHITE, COLOR_YELLOW); // split highlight
+    init_pair(18, COLOR_WHITE, COLOR_RED);    // collision highlight
 }
 
 static bool parseFloat(const char* s, float& out) {
@@ -202,12 +205,13 @@ int main(int argc, char** argv) {
     while (!done) {
         if (g_stop) done = true;
         if (g_needs_full_redraw) {
-            const std::vector<PhysicsWorld::RenderItem>* items = nullptr; uint64_t seq=0; int rw=0, rh=0;
-            if (world.getLatestSnapshot(items, seq, rw, rh)) {
+            const std::vector<PhysicsWorld::RenderItem>* items = nullptr; const std::vector<uint8_t>* hl = nullptr; uint64_t seq=0; int rw=0, rh=0;
+            if (world.getLatestSnapshot(items, hl, seq, rw, rh)) {
                 werase(stdscr);
                 prevOcc.clear();
                 for (auto& it : *items) {
-                    int pair = world.colorPairForMass(it.mass);
+                    int hlType = 0; if (hl && !hl->empty()) { size_t idx = (size_t)it.iy * (size_t)rw + (size_t)it.ix; if (idx < hl->size()) hlType = (*hl)[idx]; }
+                    int pair = (hlType==1) ? 17 : (hlType==2) ? 18 : world.colorPairForMass(it.mass);
                     bool bold = (pair >= 9);
                     if (bold) wattron(stdscr, A_BOLD);
                     wattron(stdscr, COLOR_PAIR(pair));
@@ -223,8 +227,8 @@ int main(int argc, char** argv) {
             doupdate();
         }
         // Draw from latest snapshot if new
-        const std::vector<PhysicsWorld::RenderItem>* items = nullptr; uint64_t seq=0; int rw=0, rh=0;
-        if (world.getLatestSnapshot(items, seq, rw, rh) && seq != lastSeq) {
+        const std::vector<PhysicsWorld::RenderItem>* items = nullptr; const std::vector<uint8_t>* hl = nullptr; uint64_t seq=0; int rw=0, rh=0;
+        if (world.getLatestSnapshot(items, hl, seq, rw, rh) && seq != lastSeq) {
             lastSeq = seq;
             std::unordered_set<long long> currOcc;
             currOcc.reserve(items->size()*2+16);
@@ -238,7 +242,8 @@ int main(int argc, char** argv) {
                 mvwaddch(stdscr, iy, ix, ' ');
             }
             for (auto& it : *items) {
-                int pair = world.colorPairForMass(it.mass);
+                int hlType = 0; if (hl && !hl->empty()) { size_t idx = (size_t)it.iy * (size_t)rw + (size_t)it.ix; if (idx < hl->size()) hlType = (*hl)[idx]; }
+                int pair = (hlType==1) ? 17 : (hlType==2) ? 18 : world.colorPairForMass(it.mass);
                 bool bold = (pair >= 9);
                 if (bold) wattron(stdscr, A_BOLD);
                 wattron(stdscr, COLOR_PAIR(pair));

@@ -72,8 +72,14 @@ public:
     void notifyThread();
     // Snapshot access for renderer (triple-buffered, lock-free read)
     struct RenderItem { int16_t ix; int16_t iy; char sym; uint8_t mass; uint8_t alive; };
-    struct RenderSnapshot { std::vector<RenderItem> items; int w{0}; int h{0}; std::atomic<uint64_t> seq{0}; };
-    bool getLatestSnapshot(const std::vector<RenderItem>*& items, uint64_t& seq, int& outW, int& outH) const;
+    struct RenderSnapshot {
+        std::vector<RenderItem> items;
+        std::vector<uint8_t> hl; // per-cell highlight: 0 none, 1 split (yellow), 2 collision (red)
+        int w{0}; int h{0};
+        std::atomic<uint64_t> seq{0};
+    };
+    bool getLatestSnapshot(const std::vector<RenderItem>*& items, const std::vector<uint8_t>*& hl,
+                           uint64_t& seq, int& outW, int& outH) const;
 
 private:
     // Physics helpers (SoA variants)
@@ -286,4 +292,12 @@ private:
     int snapWriteIdx{0};
     std::atomic<int> snapPublishedIdx{-1};
     std::atomic<uint64_t> snapSeq{0};
+    // One-tick highlight grid (size w*h): 0 none, 1 split, 2 collision
+    std::vector<uint8_t> highlightGrid;
+    inline void markSplitAtCell(int ix, int iy) {
+        if (ix<0||ix>=w||iy<0||iy>=h) return; size_t idx=(size_t)iy*(size_t)w+(size_t)ix; if (idx<highlightGrid.size()) highlightGrid[idx]=1;
+    }
+    inline void markCollisionAtCell(int ix, int iy) {
+        if (ix<0||ix>=w||iy<0||iy>=h) return; size_t idx=(size_t)iy*(size_t)w+(size_t)ix; if (idx<highlightGrid.size()) highlightGrid[idx]=2;
+    }
 };

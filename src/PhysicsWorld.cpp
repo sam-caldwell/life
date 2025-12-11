@@ -20,15 +20,17 @@ PhysicsWorld::PhysicsWorld(int width, int height,
                            float restitution)
     : w(width), h(height), prng(rd()), gravityG(gravity), partRadius(radius), bounceRestitution(restitution) {
     initWorkers();
+    highlightGrid.assign((size_t)std::max(0,width) * (size_t)std::max(0,height), 0);
 }
 
 PhysicsWorld::~PhysicsWorld() {}
  
-bool PhysicsWorld::getLatestSnapshot(const std::vector<RenderItem>*& items, uint64_t& seq, int& outW, int& outH) const {
+bool PhysicsWorld::getLatestSnapshot(const std::vector<RenderItem>*& items, const std::vector<uint8_t>*& hl, uint64_t& seq, int& outW, int& outH) const {
     int idx = snapPublishedIdx.load(std::memory_order_acquire);
     if (idx < 0) return false;
     const RenderSnapshot& s = snaps[idx];
     items = &s.items;
+    hl = &s.hl;
     seq = s.seq.load(std::memory_order_relaxed);
     outW = s.w; outH = s.h;
     return true;
@@ -76,9 +78,13 @@ void PhysicsWorld::startThread() {
                     RenderItem it{(int16_t)ix, (int16_t)iy, soa_sym[i], soa_mass[i], (uint8_t)1};
                     dst.items.push_back(it);
                 }
+                // Copy one-tick highlight grid
+                dst.hl = highlightGrid;
                 uint64_t s = snapSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
                 dst.seq.store(s, std::memory_order_release);
                 snapPublishedIdx.store(snapWriteIdx, std::memory_order_release);
+                // Clear highlights after publishing (one tick)
+                std::fill(highlightGrid.begin(), highlightGrid.end(), 0);
                 // Advance write index to a buffer different from published
                 int next = (snapWriteIdx + 1) % 3;
                 if (next == snapPublishedIdx.load(std::memory_order_acquire)) next = (next + 1) % 3;
@@ -434,6 +440,10 @@ void PhysicsWorld::handleBoundarySoA(float padding) {
                 continue;
             }
             allowNew -= need; kill.push_back(i);
+            // Mark split highlight at parent's cell (one tick)
+            int ix = clampi((int)std::round(soa_x[i]), 0, w - 1);
+            int iy = clampi((int)std::round(soa_y[i]), 0, h - 1);
+            markSplitAtCell(ix, iy);
             // equal mass shares
             int base = m / N; int rem = m - base * N; std::vector<int> masses; masses.resize(N, base); for (int t=0;t<rem;++t) masses[(size_t)t]++;
             // total kinetic energy
@@ -497,9 +507,10 @@ void PhysicsWorld::handleCollisionsSoA() {
     // 4-color contact resolution
     auto colorOfGridCell = [&](int x,int y){ return ((x&1)<<1) | (y&1); };
     std::vector<double> energyLocal((size_t)numWorkers, 0.0);
+    std::vector<std::vector<int>> collHighlightLocal((size_t)numWorkers);
     std::vector<std::vector<std::pair<size_t,size_t>>> fragLocal((size_t)numWorkers);
     const int neigh[3][2] = { {1,0}, {0,1}, {1,1} };
-    auto within_pair = [&](size_t i, size_t j, int tid){ if (!soa_alive[i]||!soa_alive[j]) return; float dx=soa_x[i]-soa_x[j], dy=soa_y[i]-soa_y[j]; float dist2=dx*dx+dy*dy; if (dist2>R2) return; float dist=std::sqrt(std::max(dist2,1e-6f)); float nx=dx/dist, ny=dy/dist; float overlap=(2*R)-dist; if (overlap>0){ float tm = (float)std::max(1,(int)soa_mass[i]) + (float)std::max(1,(int)soa_mass[j]) + 1e-4f; float pushA = (float)std::max(1,(int)soa_mass[j]) / tm; float pushB = (float)std::max(1,(int)soa_mass[i]) / tm; soa_x[i] += nx*overlap*pushA; soa_y[i] += ny*overlap*pushA; soa_x[j] -= nx*overlap*pushB; soa_y[j] -= ny*overlap*pushB; } float vn1 = soa_vx[i]*nx + soa_vy[i]*ny; float vn2 = soa_vx[j]*nx + soa_vy[j]*ny; float rel=(soa_vx[i]-soa_vx[j])*nx + (soa_vy[i]-soa_vy[j])*ny; const float MOMENTUM_THRESHOLD = 10.0f * 100.0f; float p_rel = std::fabs((float)std::max(1,(int)soa_mass[i]) * vn1 - (float)std::max(1,(int)soa_mass[j]) * vn2); if (p_rel > MOMENTUM_THRESHOLD) fragLocal[(size_t)tid].emplace_back(i,j); if (rel > 0) return; float m1 = std::max(1,(int)soa_mass[i]); float m2 = std::max(1,(int)soa_mass[j]); float ea = std::max(0,(int)soa_elast10[i]) / 10.0f; float eb = std::max(0,(int)soa_elast10[j]) / 10.0f; float e = std::max(0.0f, std::min(1.0f, std::min(ea, eb))); float jimp = -(1 + e) * rel / (1.0f/m1 + 1.0f/m2); float jx = jimp * nx; float jy = jimp * ny; soa_vx[i] += jx / m1; soa_vy[i] += jy / m1; soa_vx[j] -= jx / m2; soa_vy[j] -= jy / m2; double mu = (m1*m2)/(m1+m2); double dE = 0.5 * mu * (1.0 - (double)e * (double)e) * (double)rel * (double)rel; if (dE>0) energyLocal[(size_t)tid] += dE; };
+    auto within_pair = [&](size_t i, size_t j, int tid){ if (!soa_alive[i]||!soa_alive[j]) return; float dx=soa_x[i]-soa_x[j], dy=soa_y[i]-soa_y[j]; float dist2=dx*dx+dy*dy; if (dist2>R2) return; float dist=std::sqrt(std::max(dist2,1e-6f)); float nx=dx/dist, ny=dy/dist; float overlap=(2*R)-dist; if (overlap>0){ float tm = (float)std::max(1,(int)soa_mass[i]) + (float)std::max(1,(int)soa_mass[j]) + 1e-4f; float pushA = (float)std::max(1,(int)soa_mass[j]) / tm; float pushB = (float)std::max(1,(int)soa_mass[i]) / tm; soa_x[i] += nx*overlap*pushA; soa_y[i] += ny*overlap*pushA; soa_x[j] -= nx*overlap*pushB; soa_y[j] -= ny*overlap*pushB; } float vn1 = soa_vx[i]*nx + soa_vy[i]*ny; float vn2 = soa_vx[j]*nx + soa_vy[j]*ny; float rel=(soa_vx[i]-soa_vx[j])*nx + (soa_vy[i]-soa_vy[j])*ny; const float MOMENTUM_THRESHOLD = 10.0f * 100.0f; float p_rel = std::fabs((float)std::max(1,(int)soa_mass[i]) * vn1 - (float)std::max(1,(int)soa_mass[j]) * vn2); if (p_rel > MOMENTUM_THRESHOLD) fragLocal[(size_t)tid].emplace_back(i,j); if (rel > 0) return; float m1 = std::max(1,(int)soa_mass[i]); float m2 = std::max(1,(int)soa_mass[j]); float ea = std::max(0,(int)soa_elast10[i]) / 10.0f; float eb = std::max(0,(int)soa_elast10[j]) / 10.0f; float e = std::max(0.0f, std::min(1.0f, std::min(ea, eb))); float jimp = -(1 + e) * rel / (1.0f/m1 + 1.0f/m2); float jx = jimp * nx; float jy = jimp * ny; soa_vx[i] += jx / m1; soa_vy[i] += jy / m1; soa_vx[j] -= jx / m2; soa_vy[j] -= jy / m2; double mu = (m1*m2)/(m1+m2); double dE = 0.5 * mu * (1.0 - (double)e * (double)e) * (double)rel * (double)rel; if (dE>0) energyLocal[(size_t)tid] += dE; int ix1=clampi((int)std::round(soa_x[i]),0,w-1), iy1=clampi((int)std::round(soa_y[i]),0,h-1); int ix2=clampi((int)std::round(soa_x[j]),0,w-1), iy2=clampi((int)std::round(soa_y[j]),0,h-1); collHighlightLocal[(size_t)tid].push_back(iy1*w + ix1); collHighlightLocal[(size_t)tid].push_back(iy2*w + ix2); };
     for (int colorPass=0; colorPass<4; ++colorPass) {
         std::vector<int> colorCells; colorCells.reserve((size_t)cells/4+1);
         for (int y=0;y<gridH;++y) for (int x=0;x<gridW;++x) if (colorOfGridCell(x,y)==colorPass) colorCells.push_back(y*gridW + x);
@@ -507,6 +518,8 @@ void PhysicsWorld::handleCollisionsSoA() {
     }
     double eSum = 0.0; for (double v : energyLocal) eSum += v; if (eSum>0) accumulateLostEnergy(eSum);
     for (auto& v : fragLocal) for (auto& p : v) fragSchedule.push_back(p);
+    // Merge collision highlight cells
+    for (auto& v : collHighlightLocal) for (int ci : v) { int cx = ci % gridW; int cy = ci / gridW; markCollisionAtCell(cx, cy); }
 }
 
 void PhysicsWorld::applyFragmentationsSoAFromSchedule() {
@@ -538,6 +551,15 @@ void PhysicsWorld::applyFragmentationsSoAFromSchedule() {
         if (!soa_alive[i] || !soa_alive[j]) continue;
         if (soa_mass[i] < 2 || soa_mass[j] < 2) continue;
         if (liveCount + 2 > MaxParticles) continue;
+        // Mark split highlight at both parent cells
+        {
+            int aix = clampi((int)std::round(soa_x[i]), 0, w - 1);
+            int aiy = clampi((int)std::round(soa_y[i]), 0, h - 1);
+            markSplitAtCell(aix, aiy);
+            int bix = clampi((int)std::round(soa_x[j]), 0, w - 1);
+            int biy = clampi((int)std::round(soa_y[j]), 0, h - 1);
+            markSplitAtCell(bix, biy);
+        }
         // compute ortho offset
         float dx = soa_x[i] - soa_x[j], dy = soa_y[i] - soa_y[j]; float len = std::sqrt(std::max(1e-6f, dx*dx+dy*dy));
         float nx = dx/len, ny = dy/len; float tx=-ny, ty=nx; float sep = std::max(0.1f, partRadius*0.6f);
@@ -624,6 +646,10 @@ void PhysicsWorld::updateDecaySoA() {
             if (allowNew >= need) {
                 allowNew -= need; acceptedKills.push_back(pi);
                 auto& vec = it->second; acceptedKids.insert(acceptedKids.end(), vec.begin(), vec.end());
+                // Mark split highlight at parent's cell
+                int ix = clampi((int)std::round(soa_x[pi]), 0, w - 1);
+                int iy = clampi((int)std::round(soa_y[pi]), 0, h - 1);
+                markSplitAtCell(ix, iy);
             }
         }
         for (size_t idx : acceptedKills) soa_alive[idx] = 0;
