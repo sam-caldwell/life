@@ -396,23 +396,75 @@ void PhysicsWorld::handleCollisions() {
     struct Pair { size_t i; size_t j; float nx; float ny; float overlap; float rel; float vn1; float vn2; };
     std::vector<Pair> contacts;
     contacts.reserve(n);
+
+    // Uniform grid (linked-cell) broad-phase to prune pair checks
+    const float cellSize = std::max(1.0f, 2.0f * R);
+    const int gridW = std::max(1, (int)std::ceil((float)w / cellSize));
+    const int gridH = std::max(1, (int)std::ceil((float)h / cellSize));
+    std::vector<std::vector<size_t>> grid((size_t)gridW * (size_t)gridH);
+    auto cellIndex = [&](float x, float y) -> int {
+        int cx = (int)std::floor(x / cellSize);
+        int cy = (int)std::floor(y / cellSize);
+        if (cx < 0) cx = 0; if (cx >= gridW) cx = gridW - 1;
+        if (cy < 0) cy = 0; if (cy >= gridH) cy = gridH - 1;
+        return cy * gridW + cx;
+    };
     for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
-            auto& a = particles[i];
-            auto& b = particles[j];
-            if (!a.alive || !b.alive) continue;
-            float dx = a.x - b.x;
-            float dy = a.y - b.y;
-            float dist2 = dx*dx + dy*dy;
-            if (dist2 <= R2) {
-                float dist = std::sqrt(std::max(dist2, 1e-6f));
-                float nx = dx / dist;
-                float ny = dy / dist;
-                float overlap = (2*R) - dist;
-                float vn1 = a.vx * nx + a.vy * ny;
-                float vn2 = b.vx * nx + b.vy * ny;
-                float rel = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
-                contacts.push_back({i,j,nx,ny,overlap,rel,vn1,vn2});
+        auto& p = particles[i];
+        if (!p.alive) continue;
+        int idx = cellIndex(p.x, p.y);
+        grid[(size_t)idx].push_back(i);
+    }
+
+    static const int OFFS[4][2] = { {1,0}, {0,1}, {1,1}, {-1,1} };
+    for (int cy = 0; cy < gridH; ++cy) {
+        for (int cx = 0; cx < gridW; ++cx) {
+            size_t base = (size_t)(cy * gridW + cx);
+            auto& cell = grid[base];
+            // Pairs within the same cell
+            for (size_t aidx = 0; aidx < cell.size(); ++aidx) {
+                for (size_t bidx = aidx + 1; bidx < cell.size(); ++bidx) {
+                    size_t i = cell[aidx], j = cell[bidx];
+                    auto& a = particles[i]; auto& b = particles[j];
+                    if (!a.alive || !b.alive) continue;
+                    float dx = a.x - b.x; float dy = a.y - b.y;
+                    float dist2 = dx*dx + dy*dy;
+                    if (dist2 <= R2) {
+                        float dist = std::sqrt(std::max(dist2, 1e-6f));
+                        float nx = dx / dist; float ny = dy / dist;
+                        float overlap = (2*R) - dist;
+                        float vn1 = a.vx * nx + a.vy * ny;
+                        float vn2 = b.vx * nx + b.vy * ny;
+                        float rel = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
+                        contacts.push_back({i,j,nx,ny,overlap,rel,vn1,vn2});
+                    }
+                }
+            }
+            // Cross-cell pairs with 4 unique neighbor offsets to avoid duplicates
+            for (auto& d : OFFS) {
+                int nxCell = cx + d[0];
+                int nyCell = cy + d[1];
+                if (nxCell < 0 || nxCell >= gridW || nyCell < 0 || nyCell >= gridH) continue;
+                size_t nb = (size_t)(nyCell * gridW + nxCell);
+                auto& ncell = grid[nb];
+                for (size_t aidx = 0; aidx < cell.size(); ++aidx) {
+                    for (size_t bidx = 0; bidx < ncell.size(); ++bidx) {
+                        size_t i = cell[aidx], j = ncell[bidx];
+                        auto& a = particles[i]; auto& b = particles[j];
+                        if (!a.alive || !b.alive) continue;
+                        float dx = a.x - b.x; float dy = a.y - b.y;
+                        float dist2 = dx*dx + dy*dy;
+                        if (dist2 <= R2) {
+                            float dist = std::sqrt(std::max(dist2, 1e-6f));
+                            float nx = dx / dist; float ny = dy / dist;
+                            float overlap = (2*R) - dist;
+                            float vn1 = a.vx * nx + a.vy * ny;
+                            float vn2 = b.vx * nx + b.vy * ny;
+                            float rel = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
+                            contacts.push_back({i,j,nx,ny,overlap,rel,vn1,vn2});
+                        }
+                    }
+                }
             }
         }
     }
@@ -459,6 +511,12 @@ void PhysicsWorld::handleCollisions() {
         auto& b = particles[j];
         if (!a.alive || !b.alive) continue;
 
+        // Enforce strict conservation rules for collision-driven fragmentation:
+        // - Both parents must have mass >= 2 (to avoid zero-mass children)
+        // - Capacity must permit replacing 2 parents with 4 children (net +2)
+        if (a.mass < 2 || b.mass < 2) continue; // cannot split conservatively
+        if (liveCount + 2 > MaxParticles) continue; // insufficient capacity; defer fragmentation
+
         // Erase originals from screen
         if (win) {
             if (a.prev_ix >= 0 && a.prev_iy >= 0) mvwaddch(win, a.prev_iy, a.prev_ix, ' ');
@@ -475,40 +533,23 @@ void PhysicsWorld::handleCollisions() {
         float tx = -ny, ty = nx;
         float sep = std::max(0.1f, partRadius * 0.6f);
 
-        // For a
+        // For a: exact 50/50 split (integer), guaranteed >=1 per child
         Particle a1 = spawnChild(a, tx * sep, ty * sep);
         Particle a2 = spawnChild(a, -tx * sep, -ty * sep);
-        // Mass split with minimum 1 per child when possible
         a1.mass = a.mass / 2;
         a2.mass = a.mass - a1.mass;
-        if (a.mass >= 2) {
-            if (a1.mass < 1) { a1.mass = 1; a2.mass = a.mass - 1; }
-            if (a2.mass < 1) { a2.mass = 1; a1.mass = a.mass - 1; }
-        }
-        // For b
+        // For b: exact 50/50 split (integer)
         Particle b1 = spawnChild(b, tx * sep, ty * sep);
         Particle b2 = spawnChild(b, -tx * sep, -ty * sep);
         b1.mass = b.mass / 2;
         b2.mass = b.mass - b1.mass;
-        if (b.mass >= 2) {
-            if (b1.mass < 1) { b1.mass = 1; b2.mass = b.mass - 1; }
-            if (b2.mass < 1) { b2.mass = 1; b1.mass = b.mass - 1; }
-        }
 
-        // Enforce capacity: remove parents (net -2), then add children up to MaxParticles
+        // Capacity: we already ensured net +2 fits
         liveCount -= 2;
-        auto tryAdd = [&](const Particle& c){
-            if (c.mass >= 1 && liveCount < MaxParticles) {
-                newParticles.push_back(c); ++liveCount;
-            } else {
-                if (c.mass > 0) accumulateLostMass((double)c.mass);
-            }
-        };
-        // Only add non-zero mass children
-        tryAdd(a1);
-        tryAdd(a2);
-        tryAdd(b1);
-        tryAdd(b2);
+        newParticles.push_back(a1); ++liveCount;
+        newParticles.push_back(a2); ++liveCount;
+        newParticles.push_back(b1); ++liveCount;
+        newParticles.push_back(b2); ++liveCount;
     }
 
     // Resolve remaining contacts with collision response (skip dead pairs)
@@ -595,9 +636,10 @@ void PhysicsWorld::updateDecay() {
         // Time to decay
         p.decayTicks = 0;
         if (p.symbol == 'Z') {
-            // Z -> 2xY (if capacity allows)
-            if (liveCount >= MaxParticles) continue; // cannot add more
+            // Z -> 2xY (exact mass conservation; 50/50 integer split)
             if (p.mass < 2) { p.symbol = 'Y'; continue; }
+            // Need capacity to replace 1 with 2 (net +1)
+            if (liveCount + 1 > MaxParticles) continue;
             char sym = 'Y';
             int m1 = p.mass / 2;
             int m2 = p.mass - m1;
@@ -607,10 +649,6 @@ void PhysicsWorld::updateDecay() {
             float ux = std::cos(theta);
             float uy = std::sin(theta);
             float sep = std::max(0.1f, partRadius * 0.6f);
-
-            size_t addCap = (MaxParticles > liveCount) ? (MaxParticles - liveCount) : 0;
-            // We aim to replace 1 particle with 2 -> net +1
-            if (addCap == 0) continue;
             // remove parent
             if (win && p.prev_ix >= 0 && p.prev_iy >= 0) mvwaddch(win, p.prev_iy, p.prev_ix, ' ');
             p.alive = false; toRemove.push_back(i); --liveCount;
@@ -618,14 +656,10 @@ void PhysicsWorld::updateDecay() {
             Particle c1 = makeChild(p, sym, m1, ux*sep, uy*sep);
             c1.vx = ux * 1.0f; c1.vy = uy * 1.0f;
             toAdd.push_back(c1); ++liveCount;
-            if (liveCount < MaxParticles) {
-                Particle c2 = makeChild(p, sym, m2, -ux*sep, -uy*sep);
-                c2.vx = -ux * 1.0f; c2.vy = -uy * 1.0f;
-                toAdd.push_back(c2); ++liveCount;
-            } else {
-                // Could not add second child due to capacity; accumulate its mass
-                accumulateLostMass((double)m2);
-            }
+            // We ensured capacity, so second child must fit
+            Particle c2 = makeChild(p, sym, m2, -ux*sep, -uy*sep);
+            c2.vx = -ux * 1.0f; c2.vy = -uy * 1.0f;
+            toAdd.push_back(c2); ++liveCount;
         }
     }
 
