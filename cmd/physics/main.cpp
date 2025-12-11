@@ -12,6 +12,7 @@
 #include <string>
 #include <cerrno>
 #include <random>
+#include <unordered_set>
 #include "PhysicsWorld.h"
 #include "Logger.h"
 
@@ -192,48 +193,82 @@ int main(int argc, char** argv) {
         world.reseed(n);
         Logger::info("physics reseed: count=" + std::to_string(n));
     }
-    world.drawAll(stdscr);
+    world.startThread();
     world.drawStatusLine(stdscr);
+    doupdate();
     world.setRunning(false);
 
     bool done = false;
     using namespace std::chrono;
     auto lastStep = steady_clock::now();
+    // Snapshot-driven rendering state
+    uint64_t lastSeq = 0;
+    std::unordered_set<long long> prevOcc;
     while (!done) {
         if (g_stop) done = true;
         if (g_needs_full_redraw) {
-            world.drawAll(stdscr);
+            const std::vector<PhysicsWorld::RenderItem>* items = nullptr; uint64_t seq=0; int rw=0, rh=0;
+            if (world.getLatestSnapshot(items, seq, rw, rh)) {
+                werase(stdscr);
+                prevOcc.clear();
+                for (auto& it : *items) {
+                    int pair = world.colorPairForMass(it.mass);
+                    bool bold = (pair >= 9);
+                    if (bold) wattron(stdscr, A_BOLD);
+                    wattron(stdscr, COLOR_PAIR(pair));
+                    mvwaddch(stdscr, it.iy, it.ix, it.sym);
+                    wattroff(stdscr, COLOR_PAIR(pair));
+                    if (bold) wattroff(stdscr, A_BOLD);
+                    long long key = ((long long)it.iy << 32) ^ (unsigned long long)it.ix;
+                    prevOcc.insert(key);
+                }
+            }
             world.drawStatusLine(stdscr);
             g_needs_full_redraw = 0;
+            doupdate();
         }
-        // Run simulation step based on elapsed time and configured cadence
-        if (world.isRunning()) {
-            auto now = steady_clock::now();
-            auto msDesired = world.getStepDelayMs();
-            if (msDesired < 1) msDesired = 1;
-            auto elapsed = duration_cast<milliseconds>(now - lastStep).count();
-            if (elapsed >= msDesired) {
-                float dt = static_cast<float>(elapsed) / 1000.0f;
-                world.step(dt);
-                lastStep = now;
+        // Draw from latest snapshot if new
+        const std::vector<PhysicsWorld::RenderItem>* items = nullptr; uint64_t seq=0; int rw=0, rh=0;
+        if (world.getLatestSnapshot(items, seq, rw, rh) && seq != lastSeq) {
+            lastSeq = seq;
+            std::unordered_set<long long> currOcc;
+            currOcc.reserve(items->size()*2+16);
+            for (auto& it : *items) {
+                long long key = ((long long)it.iy << 32) ^ (unsigned long long)it.ix;
+                currOcc.insert(key);
             }
-        } else {
-            // keep time reference fresh while paused
-            lastStep = steady_clock::now();
+            for (auto key : prevOcc) if (!currOcc.count(key)) {
+                int iy = (int)(key >> 32);
+                int ix = (int)(key & 0xffffffffULL);
+                mvwaddch(stdscr, iy, ix, ' ');
+            }
+            for (auto& it : *items) {
+                int pair = world.colorPairForMass(it.mass);
+                bool bold = (pair >= 9);
+                if (bold) wattron(stdscr, A_BOLD);
+                wattron(stdscr, COLOR_PAIR(pair));
+                mvwaddch(stdscr, it.iy, it.ix, it.sym);
+                wattroff(stdscr, COLOR_PAIR(pair));
+                if (bold) wattroff(stdscr, A_BOLD);
+            }
+            prevOcc.swap(currOcc);
         }
         world.drawStatusLine(stdscr);
+        doupdate();
         int ch = getch();
         switch (ch) {
             case 'q': case 'Q':
                 Logger::info("quit requested"); done = true; break;
             case 's': case 'S':
-                world.toggleRunning(); Logger::info(std::string("running = ") + (world.isRunning()?"true":"false")); break;
+                world.toggleRunning(); world.notifyThread(); Logger::info(std::string("running = ") + (world.isRunning()?"true":"false")); break;
             case 'p': case 'P':
-                world.setRunning(false); Logger::info("paused"); break;
+                world.setRunning(false); world.notifyThread(); Logger::info("paused"); break;
             case 'r': case 'R':
-                world.reseedRandom(); world.drawAll(stdscr); Logger::info("reseed random"); break;
+                world.reseedRandom(); 
+                Logger::info("reseed random"); break;
             case 'c': case 'C':
-                world.setRunning(false); world.clear(); Logger::info("clear requested"); break;
+                world.setRunning(false); world.notifyThread(); world.clear(); 
+                Logger::info("clear requested"); break;
             case '+':
                 world.setStepDelayMs(world.getStepDelayMs() - 5); Logger::info("delay set(ms): " + std::to_string(world.getStepDelayMs())); break;
             case '-':

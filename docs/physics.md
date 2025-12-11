@@ -68,6 +68,19 @@ No background thread: the main loop steps the world based on elapsed time.
   pairs. In the worst case (all particles in one cell) it degrades toward O(n²), but this is rare with reasonable
   radii and distributions.
 
+## Performance Improvements
+
+- Build optimization: Release builds use `-O3 -DNDEBUG -march=native` with link-time optimization (LTO) and fast-math
+  enabled when supported.
+- Gravity: Replaced per-particle/cluster summation with a Barnes–Hut quadtree for O(n log n) far-field approximation.
+- Memory reuse: Reuses the collision broad-phase grid and contact buffers each frame to avoid reallocations.
+- In-place compaction: Removes dead particles by compacting the array in place and appends new particles without
+  constructing throwaway vectors.
+- Hot map reserves: `adjacencyCounts` pre-reserves capacity to reduce rehashing churn during combine checks.
+- Fixed time step: Simulation advances with a fixed dt using an accumulator, improving numerical stability and CPU
+  predictability under load.
+- Rendering I/O: Skips redraw for particles that did not move screen cell this frame to reduce terminal writes.
+
 ## Safety and Cleanup
 
 - Terminal is restored on SIGINT/SIGTERM and after suspend/resume. On resume, curses is reinitialized and a full
